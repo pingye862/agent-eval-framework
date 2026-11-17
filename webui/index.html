@@ -261,6 +261,8 @@
           <div class="field"><label>状态断言 state_after（JSON 数组，可空）</label>
             <textarea id="c_state" rows="2" placeholder='[{"path": "response.status", "value": "completed"}]'></textarea></div>
         </div>
+        <div class="field" style="margin-top:10px"><label>多轮对话 turns（JSON 数组，可空）——第 2 轮起的后续轮次，第 1 轮即上面的 query</label>
+          <textarea id="c_turns" rows="3" placeholder='[{"query": "补充：2024 年", "response_contains": ["营业收入"]}]'></textarea></div>
         <div style="margin-top:12px;display:flex;gap:10px">
           <button class="btn-primary" id="caseSaveBtn" onclick="saveCase()">保存用例</button>
           <button class="btn-ghost" onclick="closeCaseForm()">取消</button>
@@ -388,6 +390,7 @@ function caseSummary(c) {
   if ((c.must_not_call || []).length)
     parts.push('禁调: ' + c.must_not_call.map(t => t.tool || t).join('|'));
   if ((c.state_after || []).length) parts.push(`状态断言×${c.state_after.length}`);
+  if ((c.turns || []).length) parts.push(`多轮×${c.turns.length + 1}`);
   return parts.join(' · ') || '—';
 }
 
@@ -432,6 +435,8 @@ function openCaseForm(c) {
   $('c_mustnot').value = c ? (c.must_not_call || []).map(t => t.tool || t).join(', ') : '';
   $('c_state').value = c && (c.state_after || []).length
     ? JSON.stringify(c.state_after, null, 1) : '';
+  $('c_turns').value = c && (c.turns || []).length
+    ? JSON.stringify(c.turns, null, 1) : '';
   $('caseFormWrap').dataset.editId = c ? c.id : '';
   $('caseFormWrap').style.display = 'block';
   $('c_id').focus();
@@ -450,12 +455,25 @@ function parseState(text) {
   return arr;
 }
 
+function parseTurns(text) {
+  const t = text.trim();
+  if (!t) return [];
+  const arr = JSON.parse(t);                     // 抛错由上层提示
+  if (!Array.isArray(arr)) throw new Error('turns 必须是 JSON 数组');
+  for (const it of arr)
+    if (!it || typeof it !== 'object' || !(it.query || '').trim())
+      throw new Error('turns 每轮都必须含非空 "query" 字段');
+  return arr;
+}
+
 async function saveCase() {
   const btn = $('caseSaveBtn');
   const editId = $('caseFormWrap').dataset.editId;
-  let state;
+  let state, turns;
   try { state = parseState($('c_state').value); }
   catch (e) { return cMsg('✗ state_after 格式错误: ' + e.message, false); }
+  try { turns = parseTurns($('c_turns').value); }
+  catch (e) { return cMsg('✗ turns 格式错误: ' + e.message, false); }
   const c = {
     id: $('c_id').value.trim(),
     query: $('c_query').value.trim(),
@@ -466,6 +484,7 @@ async function saveCase() {
     must_call: $('c_mustcall').value.trim(),
     must_not_call: $('c_mustnot').value.trim(),
     state_after: state,
+    turns,
   };
   btn.disabled = true;
   try {

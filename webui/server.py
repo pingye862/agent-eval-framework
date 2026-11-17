@@ -40,7 +40,7 @@ sys.path.insert(1, str(W03_DIR))
 sys.path.insert(2, str(DEMO_DIR))
 
 from evalset import load_evalset                      # noqa: E402
-from harness import (BatchRunner, gate_decision,      # noqa: E402
+from harness import (BatchRunner, gate_decision, write_snapshots,   # noqa: E402
                      AgentAdapter, AgentRun, ToolCallRecord)
 
 
@@ -196,6 +196,16 @@ def _validate_case(case: dict, others: list[dict],
         case["route"] = str(case["route"]).strip()
     if not str(case.get("owner") or "").strip():
         case.pop("owner", None)
+    # 多轮 turns：空数组直接删掉；非空则必须是对象数组且每轮有非空 query
+    tv = case.get("turns")
+    if isinstance(tv, list) and not tv:
+        case.pop("turns", None)
+    elif tv is not None:
+        if not isinstance(tv, list):
+            raise ValueError("turns 必须是 JSON 数组")
+        for j, t in enumerate(tv):
+            if not isinstance(t, dict) or not str(t.get("query") or "").strip():
+                raise ValueError(f"turns[{j}] 必须是对象且含非空 query 字段")
     return case
 
 
@@ -559,6 +569,16 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:                            # noqa: BLE001
             self._json({"error": f"跑批失败: {e}"}, 500)
             return
+
+        # 执行轨迹自动落快照（JSONL 追加，按评估集分文件）——回放留档用
+        try:
+            snap_dir = WEBUI_DIR / "snapshots"
+            if not snap_dir.is_dir():                     # 本机 Python 的 mkdir 补丁有坑，不用 exist_ok
+                snap_dir.mkdir()
+            snap_name = re.sub(r"[^\w\u4e00-\u9fff.-]", "_", evalset_id)
+            write_snapshots(snap_dir / f"{snap_name}.jsonl", report)
+        except Exception:                                 # noqa: BLE001
+            pass                                          # 快照失败不阻塞跑批结果
 
         gate_ok, reasons = gate_decision(report, baseline_rate=baseline)
         self._json(serialize_report(report, gate_ok, reasons, baseline))
