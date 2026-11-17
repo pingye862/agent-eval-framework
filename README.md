@@ -15,8 +15,6 @@
 ```
 agent_eval/               评测框架（9 模块 + 单测 + demo 示例项目）
 webui/                    评测控制台（python3 webui/server.py 启动，默认 8900 端口）
-integrations/fde-w03/     梧桐书店问数 Agent（FDE 课程工程）接入层
-integrations/openbidkit/  OpenBidKit_Yibiao（Electron 标书工具）接入层
 ```
 
 ## 快速开始
@@ -46,20 +44,24 @@ class MyAdapter(AgentAdapter):
                         tool_calls=[ToolCallRecord(name=t) for t in tool_calls])
 ```
 
-- **HTTP 服务型**：参考 `integrations/fde-w03/adapter.py`（POST + 响应点路径映射）
-- **Node/Electron 项目**：参考 `integrations/openbidkit/`（Python adapter spawn Node runner，直接调用仓库真实模块，依赖注入 LLM 服务）
+两种典型接入方式：
 
-评估集格式见 `integrations/fde-w03/测试集设计说明.md`（blocker/major/minor 分层出题法）。
+- **HTTP 服务型**：Agent 是独立跑的服务 → adapter 内发 POST，把响应按点路径映射成
+  `AgentRun`（final_output / tool_calls / versions）
+- **进程内代码**（含 Node/Electron 项目）：adapter 直接调用被测代码，或 spawn 一个
+  Node runner `require` 仓库真实模块并注入 LLM 服务（依赖注入式入口最容易测）
+
+评估集格式见 `agent_eval/README.md`（blocker / major / minor 分层出题法，金标集人工确认）。
 
 ## 运行环境已知坑（WorkBuddy 沙箱内跑服务）
 
 - 启动被测服务前 `unset PYTHONPATH`（WorkBuddy 注入的 sitecustomize 会劫持 `mkdir`，导致 `mkdir(exist_ok=True)` 在目录已存在时仍抛异常）
 - 本机 curl 加 `--noproxy '*'`；urllib 用 `ProxyHandler({})` 直连 opener
-- 见 `integrations/fde-w03/start_service.sh` 的自愈写法
+- 启动脚本自愈写法：启动前先 `unset PYTHONPATH PYTHONSTARTUP`
 
 ## 环境变量
 
-被测 Agent 需要模型 API key 时，统一走环境变量（参见 `integrations/fde-w03/model_env.sh.example`）：
+被测 Agent 需要模型 API key 时，统一走环境变量：
 
 ```
 FDE_MODEL_URL=https://api.deepseek.com/v1/chat/completions
