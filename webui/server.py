@@ -375,6 +375,9 @@ def serialize_report(report, gate_ok, gate_reasons, baseline) -> dict:
             "route": o.case.route,
             "owner": o.case.owner,
             "passed": o.passed,
+            "pass_runs": o.pass_runs,
+            "total_runs": o.total_runs,
+            "flaky": o.flaky,
             "assertions": [
                 {"kind": a.kind, "ok": a.ok, "detail": a.detail, "layer": a.layer.value}
                 for a in o.assertions
