@@ -1,0 +1,722 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent 评测控制台</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --border: #e2e5ea;
+    --text: #1a1f28; --muted: #6b7280;
+    --green: #16a34a; --green-bg: #ecfdf3;
+    --red: #dc2626; --red-bg: #fef2f2;
+    --orange: #d97706; --orange-bg: #fffbeb;
+    --blue: #2563eb; --blue-bg: #eff6ff;
+    --grey-bg: #f3f4f6;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.6;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 24px 20px 60px; }
+  header { margin-bottom: 20px; }
+  header h1 { font-size: 20px; font-weight: 700; }
+  header p { color: var(--muted); font-size: 12px; margin-top: 2px; }
+
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px 18px; margin-bottom: 16px;
+  }
+  .card h2 { font-size: 13px; font-weight: 600; color: var(--muted);
+    text-transform: none; margin-bottom: 12px; letter-spacing: .02em; }
+
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field label { font-size: 12px; color: var(--muted); }
+  select, input[type=number] {
+    padding: 7px 10px; border: 1px solid var(--border); border-radius: 7px;
+    background: #fff; font-size: 13px; min-width: 220px; color: var(--text);
+  }
+  input[type=number] { min-width: 100px; }
+  button {
+    padding: 8px 16px; border: none; border-radius: 7px; font-size: 13px;
+    cursor: pointer; font-weight: 600; transition: opacity .15s;
+  }
+  button:hover { opacity: .88; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .btn-primary { background: var(--blue); color: #fff; }
+  .btn-ghost { background: var(--grey-bg); color: var(--text); font-weight: 500; }
+
+  .toggle { display: flex; align-items: center; gap: 6px; font-size: 13px;
+    padding-bottom: 7px; user-select: none; cursor: pointer; }
+
+  .banner {
+    border-radius: 10px; padding: 14px 18px; margin-bottom: 16px;
+    font-weight: 600; display: none; align-items: flex-start; gap: 10px;
+  }
+  .banner.show { display: flex; }
+  .banner.pass { background: var(--green-bg); color: var(--green); border: 1px solid #bbf7d0; }
+  .banner.block { background: var(--red-bg); color: var(--red); border: 1px solid #fecaca; }
+  .banner .icon { font-size: 18px; line-height: 1.4; }
+  .banner .body { flex: 1; }
+  .banner .reasons { font-weight: 400; font-size: 13px; margin-top: 4px; }
+
+  .stats { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; display: none; }
+  .stats.show { display: flex; }
+  .stat {
+    background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px 20px; min-width: 130px;
+  }
+  .stat .num { font-size: 24px; font-weight: 700; }
+  .stat .lbl { font-size: 12px; color: var(--muted); }
+  .stat .num.green { color: var(--green); }
+  .stat .num.red { color: var(--red); }
+
+  .verinfo { font-size: 12px; color: var(--muted); margin-bottom: 14px; display: none; }
+  .verinfo.show { display: block; }
+  .verinfo code { background: var(--grey-bg); padding: 1px 6px; border-radius: 4px;
+    font-size: 11px; margin-right: 8px; }
+
+  table { width: 100%; border-collapse: collapse; }
+  th {
+    text-align: left; font-size: 12px; color: var(--muted); font-weight: 600;
+    padding: 8px 10px; border-bottom: 1px solid var(--border);
+  }
+  td { padding: 9px 10px; border-bottom: 1px solid var(--border); font-size: 13px;
+    vertical-align: middle; }
+  tr.case-row { cursor: pointer; }
+  tr.case-row:hover { background: #f8fafc; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 2px; }
+  .dot.pass { background: var(--green); }
+  .dot.fail { background: var(--red); }
+  .badge {
+    display: inline-block; font-size: 11px; padding: 1px 8px; border-radius: 20px; font-weight: 600;
+  }
+  .badge.blocker { background: var(--red-bg); color: var(--red); }
+  .badge.major { background: var(--orange-bg); color: var(--orange); }
+  .badge.minor { background: var(--blue-bg); color: var(--blue); }
+  .attr { font-size: 12px; color: var(--muted); }
+  .attr.fail { color: var(--red); }
+
+  tr.detail-row td { background: #fafbfc; padding: 14px 18px 18px; }
+  .detail-section { margin-bottom: 10px; }
+  .detail-section .h { font-size: 12px; color: var(--muted); font-weight: 600; margin-bottom: 5px; }
+  .assert-list { list-style: none; }
+  .assert-list li {
+    font-size: 12.5px; padding: 3px 0; display: flex; gap: 8px; align-items: baseline;
+  }
+  .assert-list .mark { font-weight: 700; flex-shrink: 0; }
+  .assert-list .mark.ok { color: var(--green); }
+  .assert-list .mark.no { color: var(--red); }
+  .assert-list .kind {
+    background: var(--grey-bg); border-radius: 4px; padding: 0 6px;
+    font-size: 11px; color: var(--muted); flex-shrink: 0; font-family: Menlo, monospace;
+  }
+  .output-box {
+    background: #fff; border: 1px solid var(--border); border-radius: 7px;
+    padding: 8px 12px; font-size: 12.5px; color: #374151; margin-top: 4px;
+    font-family: Menlo, monospace; word-break: break-all;
+  }
+  .first-err {
+    background: var(--red-bg); border: 1px solid #fecaca; border-radius: 7px;
+    padding: 8px 12px; font-size: 12.5px; color: var(--red); margin-top: 4px;
+  }
+  .empty { text-align: center; color: var(--muted); padding: 40px 0; font-size: 13px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; }
+  .grid2 .field input[type=text], .grid2 .field select { width: 100%; min-width: 0; }
+  input[type=text] {
+    padding: 7px 10px; border: 1px solid var(--border); border-radius: 7px;
+    font-size: 13px; width: 100%; color: var(--text);
+  }
+  textarea {
+    padding: 7px 10px; border: 1px solid var(--border); border-radius: 7px;
+    font-size: 12.5px; width: 100%; color: var(--text); font-family: Menlo, monospace;
+    resize: vertical;
+  }
+  .act-btn {
+    padding: 3px 10px !important; font-size: 12px !important; background: var(--grey-bg);
+    color: var(--text) !important; font-weight: 500 !important;
+  }
+  .act-btn.del { background: var(--red-bg); color: var(--red) !important; }
+  .case-q { max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mini { font-size: 11.5px; color: var(--muted); font-family: Menlo, monospace; }
+  .proj-item {
+    display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+    border: 1px solid var(--border); border-radius: 7px; margin-bottom: 8px; background: #fff;
+  }
+  .proj-item .nm { font-weight: 600; }
+  .proj-item .meta2 { color: var(--muted); font-size: 12px; flex: 1; }
+  .proj-item button { padding: 4px 10px; font-size: 12px; background: var(--red-bg); color: var(--red); }
+  .mgmt-msg { font-size: 12.5px; margin-top: 8px; display: none; padding: 6px 10px; border-radius: 6px; }
+  .mgmt-msg.ok { display: block; background: var(--green-bg); color: var(--green); }
+  .mgmt-msg.no { display: block; background: var(--red-bg); color: var(--red); }
+  .card h2.clickable { cursor: pointer; user-select: none; }
+  .err-box {
+    background: var(--red-bg); border: 1px solid #fecaca; color: var(--red);
+    border-radius: 10px; padding: 12px 16px; margin-bottom: 16px; display: none; font-size: 13px;
+  }
+  .err-box.show { display: block; }
+  .spin { display: inline-block; animation: rot 1s linear infinite; }
+  @keyframes rot { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Agent 评测控制台</h1>
+    <p>自建框架 agent_eval · 断言引擎 → 失败归因 → 门禁判定 · 后端零依赖</p>
+  </header>
+
+  <div class="card">
+    <h2>测试配置</h2>
+    <div class="row">
+      <div class="field">
+        <label>评估集</label>
+        <select id="evalset"></select>
+      </div>
+      <div class="field">
+        <label>被测对象（适配器）</label>
+        <select id="adapter"></select>
+      </div>
+      <div class="field">
+        <label>基线成功率</label>
+        <input type="number" id="baseline" value="1.0" min="0" max="1" step="0.01">
+      </div>
+      <label class="toggle" id="fixedWrap" style="display:none">
+        <input type="checkbox" id="fixed"> 修复缺陷后跑（红→绿演示）
+      </label>
+      <button class="btn-ghost" id="healthBtn" style="display:none">检测服务连通</button>
+      <button class="btn-primary" id="runBtn">运行测试</button>
+      <button class="btn-ghost" id="copyBtn" style="display:none">复制文本报告</button>
+    </div>
+  </div>
+
+  <div class="err-box" id="errBox"></div>
+
+  <div class="card">
+    <h2 class="clickable" onclick="toggleMgmt()">➕ 自定义项目 <span id="mgmtCount" style="font-weight:400"></span><span id="mgmtArrow" style="float:right;color:var(--muted)">▸</span></h2>
+    <div id="mgmtBody" style="display:none">
+      <div id="projList"></div>
+      <div style="border-top:1px solid var(--border);margin:12px 0;padding-top:12px">
+      <div class="grid2">
+        <div class="field"><label>项目名（唯一，用于下拉显示）</label><input type="text" id="p_name" placeholder="my-agent"></div>
+        <div class="field"><label>评估集 JSON 路径（可留空 = 自动创建空评估集）</label><input type="text" id="p_evalset" placeholder="留空则建到 webui/evalsets/项目名.json"></div>
+        <div class="field"><label>接入类型</label>
+          <select id="p_type" onchange="onTypeChange()">
+            <option value="http">HTTP 服务（配置驱动，推荐）</option>
+            <option value="python">Python 适配器类（进程内）</option>
+          </select></div>
+        <div class="field" id="f_url"><label>聊天接口 URL</label><input type="text" id="p_url" placeholder="http://127.0.0.1:9000/api/chat"></div>
+        <div class="field" id="f_health"><label>探活 URL（可选）</label><input type="text" id="p_health" placeholder="http://127.0.0.1:9000/health"></div>
+        <div class="field" id="f_body"><label>请求体模板（{query}/{session} 占位）</label><input type="text" id="p_body" value='{"question": "{query}", "session_id": "{session}"}'></div>
+        <div class="field" id="f_headers"><label>额外请求头 JSON（鉴权等，可空）</label><input type="text" id="p_headers" placeholder='{"Authorization": "Bearer ..."}'></div>
+        <div class="field" id="f_final"><label>回答字段点路径（逗号分隔=兜底顺序）</label><input type="text" id="p_final" placeholder="data.answer, result.summary"></div>
+        <div class="field" id="f_tools"><label>工具轨迹点路径（数组，可空）</label><input type="text" id="p_tools" placeholder="data.tool_calls"></div>
+        <div class="field" id="f_versions"><label>版本四要素映射 JSON（可空）</label><input type="text" id="p_versions" placeholder='{"model": "data.model"}'></div>
+        <div class="field" id="f_file" style="display:none"><label>适配器 .py 文件路径</label><input type="text" id="p_file" placeholder="/path/to/adapter.py"></div>
+        <div class="field" id="f_class" style="display:none"><label>类名（AgentAdapter 子类）</label><input type="text" id="p_class" placeholder="MyAdapter"></div>
+      </div>
+      <button class="btn-primary" id="addBtn" onclick="addProject()" style="margin-top:10px">保存并校验</button>
+      <div class="mgmt-msg" id="mgmtMsg"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 class="clickable" onclick="toggleCases()">📝 用例维护（评估集增删改查）<span id="caseArrow" style="float:right;color:var(--muted)">▸</span></h2>
+    <div id="caseBody" style="display:none">
+      <div class="row" style="margin-bottom:10px">
+        <div class="field">
+          <label>选择评估集（改动直接写回 JSON 文件，改完即可跑批）</label>
+          <select id="caseEvalset" style="min-width:340px" onchange="loadCases()"></select>
+        </div>
+        <button class="btn-ghost" onclick="loadCases()">刷新列表</button>
+        <button class="btn-primary" onclick="openCaseForm(null)">➕ 新增用例</button>
+      </div>
+      <div class="mgmt-msg" id="caseMsg"></div>
+
+      <div id="caseFormWrap" style="display:none;border:1px solid var(--border);border-radius:8px;padding:14px;margin:10px 0;background:#fafbfc">
+        <div style="font-weight:600;font-size:13px;margin-bottom:10px" id="caseFormTitle">新增用例</div>
+        <div class="grid2">
+          <div class="field"><label>用例 id（唯一）</label><input type="text" id="c_id" placeholder="wutong-net-income-aug"></div>
+          <div class="field"><label>严重级（失败时 blocker 直接拦门禁）</label>
+            <select id="c_sev">
+              <option value="blocker">blocker（资损级，拦门禁）</option>
+              <option value="major" selected>major（功能缺陷）</option>
+              <option value="minor">minor（体验瑕疵）</option>
+            </select></div>
+          <div class="field"><label>路由 route（可空）</label><input type="text" id="c_route" placeholder="metric_query / clarify / refused"></div>
+          <div class="field"><label>负责人 owner（可空）</label><input type="text" id="c_owner" placeholder="eval-owner"></div>
+        </div>
+        <div class="field" style="margin-top:10px"><label>测试问题 query（发给被测 Agent 的话）</label>
+          <textarea id="c_query" rows="2" placeholder="2026 年 8 月梧桐书店扣退后收入是多少？"></textarea></div>
+        <div class="grid2" style="margin-top:10px">
+          <div class="field"><label>答案必须包含的关键词（逗号分隔，可空）</label>
+            <input type="text" id="c_contains" placeholder="130, 收入"></div>
+          <div class="field"><label>禁止调用的工具（逗号分隔，可空）</label>
+            <input type="text" id="c_mustnot" placeholder="run_write_sql"></div>
+          <div class="field"><label>必须调用的工具（逗号分隔，可空）</label>
+            <input type="text" id="c_mustcall" placeholder="run_sql"></div>
+          <div class="field"><label>状态断言 state_after（JSON 数组，可空）</label>
+            <textarea id="c_state" rows="2" placeholder='[{"path": "response.status", "value": "completed"}]'></textarea></div>
+        </div>
+        <div style="margin-top:12px;display:flex;gap:10px">
+          <button class="btn-primary" id="caseSaveBtn" onclick="saveCase()">保存用例</button>
+          <button class="btn-ghost" onclick="closeCaseForm()">取消</button>
+          <span class="mini" style="align-self:center">state_after 支持三种条目：{path,value} 精确相等 / {path,min_length} 长度下限 / {path} 非空</span>
+        </div>
+      </div>
+
+      <table id="caseTbl" style="display:none">
+        <thead><tr>
+          <th style="width:130px">ID</th><th style="width:66px">级别</th>
+          <th style="width:100px">路由</th><th>测试问题</th>
+          <th style="width:180px">断言摘要</th><th style="width:110px">操作</th>
+        </tr></thead>
+        <tbody id="caseTbody"></tbody>
+      </table>
+      <div class="empty" id="caseEmpty">选择评估集后自动加载用例</div>
+    </div>
+  </div>
+
+  <div class="banner" id="banner">
+    <div class="icon" id="bannerIcon"></div>
+    <div class="body">
+      <span id="bannerTitle"></span>
+      <div class="reasons" id="bannerReasons"></div>
+    </div>
+  </div>
+
+  <div class="stats" id="stats">
+    <div class="stat"><div class="num" id="stRate">–</div><div class="lbl">成功率</div></div>
+    <div class="stat"><div class="num" id="stPassed">–</div><div class="lbl">通过 / 总数</div></div>
+    <div class="stat"><div class="num" id="stBlocker">–</div><div class="lbl">blocker 失败</div></div>
+  </div>
+  <div class="verinfo" id="verinfo"></div>
+
+  <div class="card">
+    <h2>用例结果 <span id="hint" style="font-weight:400;color:var(--muted)">（点击行展开断言明细）</span></h2>
+    <div id="tableWrap">
+      <div class="empty" id="empty">选择评估集与被测对象，点「运行测试」开始</div>
+      <table id="tbl" style="display:none">
+        <thead><tr>
+          <th style="width:36px"></th><th style="width:90px">ID</th>
+          <th style="width:70px">级别</th><th>问题</th>
+          <th style="width:110px">断言</th><th style="width:150px">主归因</th>
+        </tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let META = null, LAST = null, OPEN = new Set(), PROJECTS = [];
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+
+async function init() {
+  try {
+    META = await api('/api/meta');
+    PROJECTS = (await api('/api/projects')).projects;
+  } catch (e) {
+    $('errBox').innerHTML = '✗ 控制台后端未就绪（' + esc(e.message) +
+      '）。请确认服务已启动：python3 webui/server.py，然后 <a href="javascript:init()" style="color:var(--blue)">点此重试</a>';
+    $('errBox').className = 'err-box show';
+    return;
+  }
+  $('errBox').className = 'err-box';
+  rebuildSelects();
+  onEvalsetChange();
+  $('evalset').onchange = onEvalsetChange;
+  $('runBtn').onclick = run;
+  $('healthBtn').onclick = checkHealth;
+  $('copyBtn').onclick = copyReport;
+  renderProjects();
+}
+
+/* 两个下拉（跑批/用例维护）共用同一份 META；keep 用于保留跑批下拉的选中项 */
+function rebuildSelects(keep) {
+  const es = $('evalset');
+  const cur = keep !== undefined ? keep : es.value;
+  es.innerHTML = '';
+  const ce = $('caseEvalset');
+  const curPath = ce.value;
+  ce.innerHTML = '';
+  for (const [k, v] of Object.entries(META.evalsets)) {
+    const n = v.cases >= 0 ? v.cases : '?';
+    es.add(new Option(`${v.label} — ${n} 条`, k));
+    ce.add(new Option(v.label, v.path));
+  }
+  if (cur && [...es.options].some(o => o.value === cur)) es.value = cur;
+  if (curPath && [...ce.options].some(o => o.value === curPath)) ce.value = curPath;
+}
+
+async function refreshMeta(keep) {
+  META = await api('/api/meta');
+  PROJECTS = (await api('/api/projects')).projects;
+  rebuildSelects(keep);
+}
+
+/* ---------- 用例维护（评估集增删改查） ---------- */
+
+const cMsg = (t, ok) => {
+  const el = $('caseMsg');
+  el.textContent = t; el.className = 'mgmt-msg ' + (ok ? 'ok' : 'no');
+  if (t) setTimeout(() => { el.className = 'mgmt-msg'; el.textContent = ''; }, 4000);
+};
+
+function toggleCases() {
+  const b = $('caseBody');
+  b.style.display = b.style.display === 'none' ? 'block' : 'none';
+  $('caseArrow').textContent = b.style.display === 'none' ? '▸' : '▾';
+  if (b.style.display === 'block' && !$('caseTbody').children.length) loadCases();
+}
+
+function caseSummary(c) {
+  const parts = [];
+  if ((c.response_contains || []).length) parts.push('含: ' + c.response_contains.join('|'));
+  if ((c.must_call || []).length)
+    parts.push('必调: ' + c.must_call.map(t => t.tool || t).join('|'));
+  if ((c.must_not_call || []).length)
+    parts.push('禁调: ' + c.must_not_call.map(t => t.tool || t).join('|'));
+  if ((c.state_after || []).length) parts.push(`状态断言×${c.state_after.length}`);
+  return parts.join(' · ') || '—';
+}
+
+async function loadCases() {
+  const path = $('caseEvalset').value;
+  if (!path) return;
+  closeCaseForm();
+  try {
+    const j = await api('/api/cases?path=' + encodeURIComponent(path));
+    renderCases(j.cases);
+  } catch (e) { cMsg('✗ ' + e.message, false); }
+}
+
+function renderCases(cases) {
+  $('caseEmpty').textContent = cases.length
+    ? '' : '该评估集还没有用例，点「➕ 新增用例」开始添加';
+  $('caseEmpty').style.display = cases.length ? 'none' : 'block';
+  $('caseTbl').style.display = cases.length ? 'table' : 'none';
+  $('caseTbody').innerHTML = cases.map(c => `<tr>
+    <td><b>${esc(c.id)}</b></td>
+    <td><span class="badge ${esc(c.severity)}">${esc(c.severity)}</span></td>
+    <td class="mini">${esc(c.route || '—')}</td>
+    <td class="case-q" title="${esc(c.query)}">${esc(c.query)}</td>
+    <td class="mini">${esc(caseSummary(c))}</td>
+    <td>
+      <button class="act-btn" onclick='openCaseForm(${JSON.stringify(c).replace(/'/g, "&#39;")})'>编辑</button>
+      <button class="act-btn del" onclick="delCase('${esc(c.id)}')">删除</button>
+    </td>
+  </tr>`).join('');
+}
+
+function openCaseForm(c) {
+  $('caseFormTitle').textContent = c ? `编辑用例：${c.id}` : '新增用例';
+  $('c_id').value = c ? c.id : '';
+  $('c_id').disabled = false;
+  $('c_query').value = c ? c.query : '';
+  $('c_sev').value = c ? c.severity : 'major';
+  $('c_route').value = c ? (c.route || '') : '';
+  $('c_owner').value = c ? (c.owner || '') : '';
+  $('c_contains').value = c ? (c.response_contains || []).join(', ') : '';
+  $('c_mustcall').value = c ? (c.must_call || []).map(t => t.tool || t).join(', ') : '';
+  $('c_mustnot').value = c ? (c.must_not_call || []).map(t => t.tool || t).join(', ') : '';
+  $('c_state').value = c && (c.state_after || []).length
+    ? JSON.stringify(c.state_after, null, 1) : '';
+  $('caseFormWrap').dataset.editId = c ? c.id : '';
+  $('caseFormWrap').style.display = 'block';
+  $('c_id').focus();
+}
+
+function closeCaseForm() { $('caseFormWrap').style.display = 'none'; }
+
+function parseState(text) {
+  const t = text.trim();
+  if (!t) return [];
+  const arr = JSON.parse(t);                     // 抛错由上层提示
+  if (!Array.isArray(arr)) throw new Error('state_after 必须是 JSON 数组');
+  for (const it of arr)
+    if (!it || typeof it !== 'object' || !it.path)
+      throw new Error('state_after 每条都必须含 "path" 字段');
+  return arr;
+}
+
+async function saveCase() {
+  const btn = $('caseSaveBtn');
+  const editId = $('caseFormWrap').dataset.editId;
+  let state;
+  try { state = parseState($('c_state').value); }
+  catch (e) { return cMsg('✗ state_after 格式错误: ' + e.message, false); }
+  const c = {
+    id: $('c_id').value.trim(),
+    query: $('c_query').value.trim(),
+    severity: $('c_sev').value,
+    route: $('c_route').value.trim(),
+    owner: $('c_owner').value.trim(),
+    response_contains: $('c_contains').value.trim(),
+    must_call: $('c_mustcall').value.trim(),
+    must_not_call: $('c_mustnot').value.trim(),
+    state_after: state,
+  };
+  btn.disabled = true;
+  try {
+    const body = { path: $('caseEvalset').value, case: c };
+    if (editId) body.id = editId;
+    const r = await api('/api/cases', {
+      method: editId ? 'PUT' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    cMsg(`✅ 已${editId ? '更新' : '新增'}「${r.id}」，当前评估集共 ${r.total} 条`, true);
+    closeCaseForm();
+    await loadCases();
+    await refreshMeta();                        // 同步跑批下拉的用例数
+  } catch (e) { cMsg('✗ ' + e.message, false); }
+  btn.disabled = false;
+}
+
+async function delCase(id) {
+  if (!confirm(`删除用例「${id}」？删除会直接写回评估集 JSON 文件（建议先备份）。`)) return;
+  try {
+    await api('/api/cases?path=' + encodeURIComponent($('caseEvalset').value)
+              + '&id=' + encodeURIComponent(id), { method: 'DELETE' });
+    cMsg(`✅ 已删除「${id}」`, true);
+    await loadCases();
+    await refreshMeta();
+  } catch (e) { cMsg('✗ ' + e.message, false); }
+}
+
+/* ---------- 自定义项目管理 ---------- */
+
+function toggleMgmt() {
+  const b = $('mgmtBody');
+  b.style.display = b.style.display === 'none' ? 'block' : 'none';
+  $('mgmtArrow').textContent = b.style.display === 'none' ? '▸' : '▾';
+}
+
+function onTypeChange() {
+  const http = $('p_type').value === 'http';
+  ['f_url','f_health','f_body','f_headers','f_final','f_tools','f_versions'].forEach(id =>
+    $(id).style.display = http ? 'flex' : 'none');
+  ['f_file','f_class'].forEach(id => $(id).style.display = http ? 'none' : 'flex');
+}
+
+async function addProject() {
+  const msgEl = $('mgmtMsg');
+  const msg = (t, ok) => { msgEl.textContent = t; msgEl.className = 'mgmt-msg ' + (ok ? 'ok' : 'no'); };
+  const p = { name: $('p_name').value.trim(), evalset: $('p_evalset').value.trim(), adapter_type: $('p_type').value };
+  if (!p.name) return msg('项目名必填（评估集路径可留空，之后在「用例维护」里加用例）', false);
+  try {
+    if (p.adapter_type === 'http') {
+      const j = (id) => { const v = $(id).value.trim(); return v ? JSON.parse(v) : {}; };
+      p.http = {
+        url: $('p_url').value.trim(),
+        health_url: $('p_health').value.trim(),
+        body_template: j('p_body'),
+        headers: j('p_headers'),
+        response_mapping: {
+          final_output: $('p_final').value.split(',').map(s => s.trim()).filter(Boolean),
+          tool_calls: $('p_tools').value.trim(),
+          versions: j('p_versions'),
+        }
+      };
+    } else {
+      p.python = { file: $('p_file').value.trim(), class_name: $('p_class').value.trim() };
+    }
+  } catch (e) { return msg('JSON 格式错误: ' + e.message, false); }
+  $('addBtn').disabled = true;
+  try {
+    const r = await api('/api/projects', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(p) });
+    msg(`✅ 已添加「${r.name}」：${r.cases} 条用例，适配器 ${r.desc}。评估集下拉已刷新，可直接跑批`, true);
+    await refreshMeta();
+    renderProjects();
+  } catch (e) { msg('✗ ' + e.message, false); }
+  $('addBtn').disabled = false;
+}
+
+async function delProject(name) {
+  if (!confirm(`删除项目「${name}」？（不影响 projects.json 之外的任何文件）`)) return;
+  await api('/api/projects?name=' + encodeURIComponent(name), { method: 'DELETE' });
+  await refreshMeta();
+  renderProjects();
+}
+
+function renderProjects() {
+  const el = $('projList');
+  $('mgmtCount').textContent = PROJECTS.length ? `（${PROJECTS.length} 个）` : '（暂无，添加后接入新项目无需改代码）';
+  el.innerHTML = PROJECTS.length ? '' : '<div style="color:var(--muted);font-size:12.5px;margin-bottom:8px">还没有自定义项目。填下面的表单即可接入：HTTP 服务填接口地址 + 响应字段映射；进程内 Agent 指向一个 adapter.py。</div>';
+  for (const p of PROJECTS) {
+    el.insertAdjacentHTML('beforeend', `<div class="proj-item">
+      <span class="nm">${esc(p.name)}</span>
+      <span class="badge ${p.adapter_type === 'http' ? 'minor' : 'major'}">${p.adapter_type}</span>
+      <span class="meta2">${p.cases} 条用例 · ${esc(p.adapter_desc || '')} · ${p.added_at || ''}</span>
+      <button onclick="delProject('${esc(p.name)}')">删除</button>
+    </div>`);
+  }
+}
+
+/* ---------- 跑批 ---------- */
+
+function onEvalsetChange() {
+  const meta = META.evalsets[$('evalset').value];
+  const ad = $('adapter');
+  ad.innerHTML = '';
+  for (const k of meta.adapters) ad.add(new Option(META.adapters[k].label, k));
+  ad.disabled = meta.adapters.length === 1;   // 自定义项目一对一，锁定即可
+  ad.onchange = onAdapterChange;
+  onAdapterChange();
+}
+
+function onAdapterChange() {
+  const a = $('adapter').value;
+  const isCustomHttp = a.startsWith('c:') && customType(a) === 'http';
+  $('fixedWrap').style.display = a === 'demo' ? 'flex' : 'none';
+  $('healthBtn').style.display = (a === 'w03-live' || isCustomHttp) ? 'inline-block' : 'none';
+}
+
+const customType = id => { const p = PROJECTS.find(x => 'c:' + x.name === id); return p ? p.adapter_type : ''; };
+
+async function checkHealth() {
+  $('healthBtn').disabled = true; $('healthBtn').textContent = '检测中…';
+  try {
+    const j = await api('/api/health?adapter=' + $('adapter').value);
+    alert(j.ok ? '✅ 服务在线' : '✗ 不在线：' + (j.detail || ''));
+  } catch (e) { alert('检测失败: ' + e.message); }
+  $('healthBtn').disabled = false; $('healthBtn').textContent = '检测服务连通';
+}
+
+async function run() {
+  const btn = $('runBtn');
+  btn.disabled = true; btn.innerHTML = '<span class="spin">◌</span> 运行中…';
+  $('errBox').className = 'err-box';
+  try {
+    LAST = await api('/api/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        evalset: $('evalset').value,
+        adapter: $('adapter').value,
+        fixed: $('fixed').checked,
+        baseline: parseFloat($('baseline').value)
+      })
+    });
+    render(LAST);
+  } catch (e) {
+    $('errBox').textContent = '✗ ' + e.message;
+    $('errBox').className = 'err-box show';
+  }
+  btn.disabled = false; btn.textContent = '运行测试';
+  $('copyBtn').style.display = LAST ? 'inline-block' : 'none';
+}
+
+function render(r) {
+  // 门禁横幅
+  const b = $('banner');
+  b.className = 'banner show ' + (r.gate_ok ? 'pass' : 'block');
+  $('bannerIcon').textContent = r.gate_ok ? '✅' : '⛔';
+  $('bannerTitle').textContent = r.gate_ok
+    ? `门禁放行（exit 0）— 可合并`
+    : `门禁拦截（exit 1）— 禁止合并`;
+  $('bannerReasons').textContent = r.gate_ok
+    ? `基线 ${Math.round(r.baseline * 100)}%，成功率 ${pct(r.success_rate)}，blocker 全部通过`
+    : r.gate_reasons.join('；');
+
+  // 统计卡
+  $('stats').className = 'stats show';
+  $('stRate').textContent = pct(r.success_rate);
+  $('stRate').className = 'num ' + (r.success_rate >= r.baseline ? 'green' : 'red');
+  $('stPassed').textContent = `${r.passed} / ${r.total}`;
+  const bf = r.blockers_failed.length;
+  $('stBlocker').textContent = bf === 0 ? '0（全过）' : `${bf} ⛔`;
+  $('stBlocker').className = 'num ' + (bf === 0 ? 'green' : 'red');
+
+  // 版本四要素
+  const v = r.versions;
+  if (v && Object.keys(v).length) {
+    $('verinfo').className = 'verinfo show';
+    $('verinfo').innerHTML = '本次运行版本四要素：' +
+      Object.entries(v).map(([k, val]) => `<code>${k}: ${esc(String(val))}</code>`).join('');
+  } else { $('verinfo').className = 'verinfo'; }
+
+  // 表格
+  $('empty').style.display = 'none';
+  $('tbl').style.display = 'table';
+  OPEN.clear();
+  $('tbody').innerHTML = r.cases.map((c, i) => caseRow(c, i)).join('');
+  document.querySelectorAll('tr.case-row').forEach(tr => {
+    tr.onclick = () => {
+      const i = tr.dataset.i;
+      const det = $('det-' + i);
+      if (OPEN.has(i)) { OPEN.delete(i); det.remove(); }
+      else {
+        OPEN.add(i);
+        tr.insertAdjacentHTML('afterend', detailRow(LAST.cases[i], i));
+      }
+    };
+  });
+}
+
+function caseRow(c, i) {
+  const na = c.assertions.length, np = c.assertions.filter(a => a.ok).length;
+  return `<tr class="case-row" data-i="${i}">
+    <td><span class="dot ${c.passed ? 'pass' : 'fail'}"></span></td>
+    <td><b>${esc(c.id)}</b></td>
+    <td><span class="badge ${c.severity}">${c.severity}</span></td>
+    <td>${esc(c.query)}</td>
+    <td style="color:${c.passed ? 'var(--green)' : 'var(--red)'}">${np}/${na} 通过</td>
+    <td class="attr ${c.passed ? '' : 'fail'}">${c.passed ? '—' : esc(attributionLabel(c.attribution))}</td>
+  </tr>`;
+}
+
+function detailRow(c, i) {
+  const asserts = c.assertions.map(a =>
+    `<li><span class="mark ${a.ok ? 'ok' : 'no'}">${a.ok ? '✓' : '✗'}</span>
+     <span class="kind">${a.kind}</span>
+     <span>${esc(a.detail || '通过')}</span></li>`).join('');
+  const fe = c.first_error
+    ? `<div class="first-err">第一错：<b>${esc(c.first_error.step_id)}</b>
+       （${esc(c.first_error.target)}）· 主归因层：${esc(attributionLabel(c.first_error.layer))}
+       <br>${esc(c.first_error.detail)}</div>`
+    : '';
+  return `<tr class="detail-row"><td colspan="6">
+    <div class="detail-section"><div class="h">断言明细（按执行顺序，短路式）</div>
+      <ul class="assert-list">${asserts}</ul></div>
+    ${fe}
+    <div class="detail-section"><div class="h">Agent 输出</div>
+      <div class="output-box">${esc(c.final_output || '(空)')}</div></div>
+    <div class="detail-section"><div class="h">工具调用轨迹</div>
+      <div class="output-box">${c.tool_calls.length ? esc(c.tool_calls.join(' → ')) : '(无工具调用)'}</div></div>
+  </td></tr>`;
+}
+
+function attributionLabel(v) {
+  return { system: '系统层（上下文/召回）', trajectory: '轨迹层（工具选择/顺序）',
+           component: '组件层（内部模块）' }[v] || v || '—';
+}
+
+function copyReport() {
+  if (!LAST) return;
+  navigator.clipboard.writeText(LAST.text_report).then(() => {
+    $('copyBtn').textContent = '已复制 ✓';
+    setTimeout(() => $('copyBtn').textContent = '复制文本报告', 1500);
+  });
+}
+
+const pct = v => (v * 100).toFixed(1) + '%';
+const esc = s => String(s).replace(/[&<>"']/g,
+  ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+
+init();
+</script>
+</body>
+</html>

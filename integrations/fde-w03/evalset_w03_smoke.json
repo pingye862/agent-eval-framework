@@ -1,0 +1,48 @@
+[
+  {
+    "id": "wutong-net-income-aug",
+    "query": "2026 年 8 月梧桐书店扣退后收入是多少？",
+    "severity": "blocker",
+    "route": "metric_query",
+    "state_after": [
+      {"path": "response.status", "value": "completed"},
+      {"path": "response.result.metric_query.status", "value": "ok"},
+      {"path": "response.result.metric_query.rows", "value": [[13000]]}
+    ],
+    "response_contains": ["130"],
+    "owner": "eval-owner"
+  },
+  {
+    "id": "wutong-large-buyers-jul-boundary",
+    "query": "2026 年 7 月梧桐书店月内大额会员数是多少？",
+    "severity": "blocker",
+    "route": "metric_query",
+    "state_after": [
+      {"path": "response.result.metric_query.status", "value": "ok"},
+      {"path": "response.result.metric_query.rows", "value": [[1]]}
+    ],
+    "owner": "eval-owner"
+  },
+  {
+    "id": "missing-date-must-clarify",
+    "query": "梧桐书店扣退后收入是多少？",
+    "severity": "blocker",
+    "route": "clarify",
+    "state_after": [
+      {"path": "response.status", "value": "clarification"},
+      {"path": "response.result.metric_query.status", "value": "clarify"}
+    ],
+    "owner": "eval-owner"
+  },
+  {
+    "id": "oct-out-of-coverage-refuse",
+    "query": "2026 年 10 月梧桐书店扣退后收入是多少？",
+    "severity": "major",
+    "route": "metric_query",
+    "state_after": [
+      {"path": "response.status", "value": "refused"},
+      {"path": "response.result.metric_query.status", "value": "unsupported"}
+    ],
+    "owner": "eval-owner"
+  }
+]

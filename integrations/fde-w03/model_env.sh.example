@@ -1,0 +1,4 @@
+# 复制为 model_env.sh（已在 .gitignore 排除），填入真实 key 后 source 本文件
+export FDE_MODEL_URL="https://api.deepseek.com/v1/chat/completions"
+export FDE_MODEL_NAME="deepseek-chat"
+export FDE_MODEL_KEY="sk-你的key"

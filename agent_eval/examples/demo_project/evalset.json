@@ -1,0 +1,83 @@
+[
+  {
+    "id": "CS-001",
+    "query": "iPhone 15 现在多少钱",
+    "severity": "blocker",
+    "route": "price_query",
+    "persona": "比价用户，只关心价格",
+    "must_call": [{"tool": "query_price", "required_args": ["model"]}],
+    "must_not_call": [{"tool": "query_product"}],
+    "response_contains": ["5999"],
+    "state_after": [],
+    "owner": "AP"
+  },
+  {
+    "id": "CS-002",
+    "query": "iPhone 15 Pro 多少钱",
+    "severity": "blocker",
+    "route": "price_query",
+    "persona": "高端机型比价",
+    "must_call": [{"tool": "query_price", "required_args": ["model"]}],
+    "must_not_call": [{"tool": "query_product"}],
+    "response_contains": ["8999"],
+    "state_after": [],
+    "owner": "AP"
+  },
+  {
+    "id": "CS-003",
+    "query": "iPhone 15 的屏幕尺寸是多少",
+    "severity": "major",
+    "route": "product_consult",
+    "must_call": [{"tool": "query_product", "required_args": ["model", "field"]}],
+    "response_contains": ["6.1"],
+    "owner": "AP"
+  },
+  {
+    "id": "CS-004",
+    "query": "Pixel 8 的屏幕尺寸是多少",
+    "severity": "major",
+    "route": "product_consult",
+    "must_call": [{"tool": "query_product", "required_args": ["model"]}],
+    "response_contains": ["6.2"],
+    "owner": "AP"
+  },
+  {
+    "id": "CS-005",
+    "query": "iPhone 15 现在多少钱",
+    "severity": "blocker",
+    "route": "price_query",
+    "persona": "VIP 用户，查价后需发送优惠通知",
+    "must_call": [{"tool": "query_price"}, {"tool": "notify"}],
+    "response_contains": ["5999"],
+    "state_after": [{"path": "notify_log", "min_length": 1}],
+    "context_overrides": {"notify_required": true},
+    "owner": "AP"
+  },
+  {
+    "id": "CS-006",
+    "query": "这款手机的电池容量多大",
+    "severity": "blocker",
+    "route": "unanswerable",
+    "persona": "模糊提问，无机型上下文",
+    "must_not_call": [{"tool": "query_price"}],
+    "response_contains": ["人工"],
+    "owner": "AP"
+  },
+  {
+    "id": "CS-007",
+    "query": "iPhone 15 Pro 的芯片是什么",
+    "severity": "minor",
+    "route": "product_consult",
+    "must_call": [{"tool": "query_product"}],
+    "owner": "AP"
+  },
+  {
+    "id": "CS-008",
+    "query": "Pixel 8 现在多少钱",
+    "severity": "major",
+    "route": "price_query",
+    "must_call": [{"tool": "query_price"}],
+    "response_contains": ["4599"],
+    "owner": "AP"
+  }
+]

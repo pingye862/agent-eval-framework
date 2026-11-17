@@ -1,0 +1,56 @@
+[
+  {
+    "id": "seal-clause-extracted",
+    "query": "某市档案馆设备采购项目招标文件（节选）。第三章 投标须知：3.1 投标文件未按要求密封并加盖公章及法定代表人签字的，按废标处理。3.2 投标报价超过招标控制价的，作无效标处理。3.3 投标保证金未在开标前到账的，视为放弃投标。3.4 投标文件逾期送达的，不予受理。",
+    "severity": "blocker",
+    "route": "bid_analysis",
+    "response_contains": ["废标"],
+    "must_call": [{"tool": "ai.chat"}],
+    "owner": "agent-eval"
+  },
+  {
+    "id": "no-clause-no-fabrication",
+    "query": "某单位内部办公家具采购需求书（节选）。一、采购内容：办公桌椅 120 套，文件柜 40 组。二、技术要求：板材环保等级不低于 E1 级，五金件质保两年。三、交付：合同签订后 30 日内送货安装完毕。四、付款：验收合格后支付 95%，质保金 5% 一年后支付。本需求书不涉及投标评审条款。",
+    "severity": "blocker",
+    "route": "bid_analysis",
+    "response_contains": ["未提及"],
+    "must_call": [{"tool": "ai.chat"}],
+    "owner": "agent-eval"
+  },
+  {
+    "id": "over-limit-invalid",
+    "query": "某区智慧校园平台建设项目招标文件（节选）。第 8 条 投标报价：8.1 本项目招标控制价为 480 万元，投标报价超过招标控制价的，其投标作无效标处理，不进入评审。8.2 投标报价不得高于分项限价，任一分项超限按无效标处理。",
+    "severity": "major",
+    "route": "bid_analysis",
+    "response_contains": ["无效"],
+    "must_call": [{"tool": "ai.chat"}],
+    "owner": "agent-eval"
+  },
+  {
+    "id": "bid-bond-clause",
+    "query": "某医院医疗设备采购招标文件（节选）。第 5 条 投标保证金：5.1 投标保证金金额为人民币 2 万元，应于投标截止时间前以银行转账方式到达指定账户。5.2 未按时足额缴纳投标保证金的投标人，其投标将被拒绝。5.3 未中标人的保证金在中标通知书发出后 5 个工作日内退还。",
+    "severity": "major",
+    "route": "bid_analysis",
+    "response_contains": ["保证金"],
+    "must_call": [{"tool": "ai.chat"}],
+    "owner": "agent-eval"
+  },
+  {
+    "id": "late-delivery-rejected",
+    "query": "某市政道路改造工程招标文件（节选）。第 12 条 投标文件的递交：12.1 投标文件应在投标截止时间前送达开标地点，逾期送达的或者未送达指定地点的投标文件，招标人不予受理。12.2 电报、电话、传真形式的投标文件概不接收。",
+    "severity": "major",
+    "route": "bid_analysis",
+    "response_contains": ["送达"],
+    "must_call": [{"tool": "ai.chat"}],
+    "owner": "agent-eval"
+  },
+  {
+    "id": "output-markdown-structure",
+    "query": "某高校实验室改造项目招标文件（节选）。第 9 条 无效投标情形：9.1 投标文件未经法定代表人或其授权代理人签字并加盖公章的。9.2 投标人不具备招标文件规定资格条件的。9.3 投标文件载明的招标项目完成期限超过招标文件规定期限的。",
+    "severity": "minor",
+    "route": "bid_analysis",
+    "response_contains": ["无效投标"],
+    "must_call": [{"tool": "ai.chat"}],
+    "owner": "agent-eval"
+  }
+]

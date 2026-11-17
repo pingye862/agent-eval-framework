@@ -1,0 +1,17 @@
+# 密钥与本地配置（绝不入库）
+model_env.sh
+*.env
+!model_env.sh.example
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.runtime/
+
+# Node
+node_modules/
+
+# 本机生成物
+webui/evalsets/*.json.tmp
+*.log
