@@ -4,7 +4,8 @@ P1 断言（工具调用 / 关键词 / 状态）只能挡「确定性错误」�
 语义层的问题——"回答得对不对、有没有答非所问、兜底有没有兜住"——
 需要 LLM judge。但 judge 本身也是模型，不能裸上岗：
 
-- 校准门槛：judge 对金标集的判断先过「一致率 ≥85% 且 Spearman ≥0.8」才准参与门禁
+- 校准门槛：judge 对金标集的判断先过「一致率 ≥85% 且 Cohen's κ ≥0.8」才准参与门禁
+  （κ 对随机一致性做了修正——90% 全 pass 的金标集里两边全 pass 的一致率是碰巧，κ≈0）
 - 未校准 / 未配置时自动跳过并标注，绝不硬判
 - 证据不足输出「需复核」（need_review），不猜
 
@@ -40,39 +41,31 @@ JUDGE_SYSTEM_PROMPT = """你是 AI Agent 评测的语义判分器。根据判分
 
 # ---------- 校准统计（金标集驱动） ----------
 
-def spearman(xs: list[float], ys: list[float]) -> float:
-    """秩相关。衡量机器给出的好坏**排序**是否与人工一致（带并列的秩，平均法）。"""
-    n = len(xs)
-    if n != len(ys) or n < 2:
-        raise ValueError("金标集样本数不足或长度不一致")
-    rx = _ranks(xs)
-    ry = _ranks(ys)
-    d2 = sum((a - b) ** 2 for a, b in zip(rx, ry))
-    return 1 - (6 * d2) / (n * (n * n - 1))
-
-
-def _ranks(vals: list[float]) -> list[float]:
-    """带并列的秩（平均法）。人工打分常见 0/0.5/1，并列很多。"""
-    order = sorted(range(len(vals)), key=lambda i: vals[i])
-    ranks = [0.0] * len(vals)
-    i = 0
-    while i < len(order):
-        j = i
-        while j + 1 < len(order) and vals[order[j + 1]] == vals[order[i]]:
-            j += 1
-        avg = (i + j) / 2 + 1
-        for k in range(i, j + 1):
-            ranks[order[k]] = avg
-        i = j + 1
-    return ranks
-
-
 def agreement_rate(machine: list[float], human: list[float]) -> float:
     """一致率 = 完全一致样本数 / 总数（粗筛口径）。"""
     if len(machine) != len(human) or not machine:
         raise ValueError("样本数不一致或为空")
     hits = sum(1 for m, h in zip(machine, human) if m == h)
     return hits / len(machine)
+
+
+def cohen_kappa(machine: list[float], human: list[float]) -> float:
+    """Cohen's κ（二值标签）。一致率按「随机一致性」修正：κ = (po - pe) / (1 - pe)。
+
+    为什么不用 Spearman：判分是 pass/fail 二值，机器全判 pass 时秩全部并列，
+    Spearman 会算出 1.0 的假象——「一致率 0.9 但 κ≈0」的 judge 照样被放行。
+    κ 的解读（Landis & Koch）：≥0.8 几乎完美，0.6~0.8 可观，≤0 纯碰巧。
+    """
+    if len(machine) != len(human) or not machine:
+        raise ValueError("样本数不一致或为空")
+    n = len(machine)
+    po = agreement_rate(machine, human)
+    p_m = sum(machine) / n                # 机器判 pass 的边际率
+    p_h = sum(human) / n                  # 人工判 pass 的边际率
+    pe = p_m * p_h + (1 - p_m) * (1 - p_h)
+    if pe >= 1.0 - 1e-12:                 # 双方边际全同标签：po 必然 = 1
+        return 1.0 if po >= 1.0 - 1e-12 else 0.0
+    return (po - pe) / (1 - pe)
 
 
 @dataclass
@@ -82,9 +75,9 @@ class CalibrationReport:
     dim: str
     n: int
     agreement: float
-    spearman: float
+    kappa: float
     pass_agreement: bool      # ≥ 0.85（粗筛门槛）
-    pass_spearman: bool       # ≥ 0.80（精评门槛）
+    pass_kappa: bool          # ≥ 0.80（随机一致性修正后的精评门槛）
     qualified: bool
 
 
@@ -204,7 +197,7 @@ def calibrate_judge(machine: list[str], human: list[str],
                     min_samples: int = 200) -> CalibrationReport:
     """judge 上岗校准。machine/human 为 pass/fail 标签序列（人工金标 vs judge 判定）。
 
-    门槛：一致率 ≥85% 且 Spearman ≥0.8。
+    门槛：一致率 ≥85% 且 Cohen's κ ≥0.8。
     need_review 样本按「不一致」计——judge 说不准本身就是不达标。
     """
     if len(machine) != len(human) or not machine:
@@ -216,16 +209,16 @@ def calibrate_judge(machine: list[str], human: list[str],
     m01 = [1.0 if v == "pass" else 0.0 for v in machine]
     h01 = [1.0 if v == "pass" else 0.0 for v in human]
     ag = agreement_rate(m01, h01)
-    sp = spearman(m01, h01)
-    ok_ag, ok_sp = ag >= 0.85, sp >= 0.80
+    kp = cohen_kappa(m01, h01)
+    ok_ag, ok_kp = ag >= 0.85, kp >= 0.80
     return CalibrationReport(
         dim="semantic_judge",
         n=len(machine),
         agreement=round(ag, 4),
-        spearman=round(sp, 4),
+        kappa=round(kp, 4),
         pass_agreement=ok_ag,
-        pass_spearman=ok_sp,
-        qualified=ok_ag and ok_sp,
+        pass_kappa=ok_kp,
+        qualified=ok_ag and ok_kp,
     )
 
 
@@ -247,6 +240,6 @@ def load_judge_from_env() -> Optional[SemanticJudge]:
 __all__ = [
     "JudgeError", "OpenAICompatClient", "SemanticJudge",
     "calibrate_judge", "load_judge_from_env",
-    "agreement_rate", "spearman", "CalibrationReport",
+    "agreement_rate", "cohen_kappa", "CalibrationReport",
     "JUDGE_SYSTEM_PROMPT",
 ]

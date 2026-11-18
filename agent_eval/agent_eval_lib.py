@@ -7,6 +7,6 @@ from coverage import CoverageLedger                               # noqa: F401
 from replay import SnapshotStore, ReplayRunner                    # noqa: F401
 from judge import (SemanticJudge, OpenAICompatClient,             # noqa: F401
                    calibrate_judge, load_judge_from_env,
-                   agreement_rate, spearman, CalibrationReport)
+                   agreement_rate, cohen_kappa, CalibrationReport)
 from report import (build_ledger, render_coverage_html,                   # noqa: F401
                     render_coverage_text)

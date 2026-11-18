@@ -9,7 +9,7 @@ agent_eval/
 ├── models.py            数据模型：覆盖单元 / 快照 / 归因层 / 门禁判定
 ├── coverage.py          覆盖账本 + 6 类未覆盖原因 + 覆盖率审计
 ├── attribution.py       归因引擎：三层只认一个主归因 + 链路第一错
-├── judge.py             P2 语义判分 + 金标校准统计（一致率 / Spearman）
+├── judge.py             P2 语义判分 + 金标校准统计（一致率 / Cohen's κ）
 ├── harness.py           执行器：P1 断言 + 跑批 + 归因 + 门禁
 ├── evalset.py           评估集加载
 ├── replay.py            快照管理 + 单变量回放（3 种情形 + 门禁）
@@ -28,7 +28,7 @@ agent_eval/
 
 ```bash
 cd agent_eval
-python -m pytest tests/ -v          # 框架自身单元测试（与 webui 测试合计 113 条）
+python -m pytest tests/ -v          # 框架自身单元测试（与 webui 测试合计 118 条）
 
 # 完整接入示例（推荐先跑这个）
 cd examples/demo_project
@@ -85,7 +85,7 @@ python3 run_eval.py --gate --baseline 0.95   # 门禁模式：比基线掉 2pp �
 |---|---|
 | `agent_eval_lib.py` | 门面，外部项目只 import 它 |
 | `harness.py` | 执行器：AgentAdapter 协议 + P1 断言 + P2 语义判分接入 + 跑批 + 归因 + 门禁判定 |
-| `judge.py` | P2 语义判分：LLM judge + 金标校准（一致率 ≥85% 且 Spearman ≥0.8 才上岗） |
+| `judge.py` | P2 语义判分：LLM judge + 金标校准（一致率 ≥85% 且 Cohen's κ ≥0.8 才上岗） |
 | `report.py` | 覆盖账本可视化：单文件 HTML 审计报告（按层拆解 / 6 类原因 / 高风险红线） |
 | `evalset.py` | 评估集加载（缺必填字段直接报错，半成品进不了门禁） |
 | `models.py` / `attribution.py` / `replay.py` / `coverage.py` | 方法论内核（见下表） |

@@ -7,6 +7,11 @@
 - wrong_tool: 价格查询路由错到参数工具（工具选择错）
 - skip_notify: 该发通知时没发（副作用缺失）
 - hallucinate: 不知道时编造参数值
+
+并发安全：缺陷开关与副作用日志都**优先从 context 读取**（context["bugs"] /
+context["notify_log"]），模块级 BUGS / NOTIFY_LOG 只是未注入时的默认值。
+跑批方（webui / CLI）按次注入，多线程并发跑批互不踩踏——不再依赖
+「改全局变量再跑」这种天然有竞态的开关方式。
 """
 import sys
 import os
@@ -30,7 +35,7 @@ PRODUCT_DB = {
 PRICE_DB = {
     "iphone 15": 5999, "iphone 15 pro": 8999, "pixel 8": 4599,
 }
-NOTIFY_LOG: list[dict] = []   # mock 副作用
+NOTIFY_LOG: list[dict] = []   # mock 副作用（默认落点；注入 context["notify_log"] 时用注入的）
 
 
 def tool_query_product(model: str, field: str) -> str:
@@ -45,16 +50,24 @@ def tool_query_price(model: str) -> str:
     return str(p) if p else "UNKNOWN"
 
 
-def tool_notify(message: str) -> str:
-    NOTIFY_LOG.append({"message": message})
+def tool_notify(message: str, log: list | None = None) -> str:
+    (log if log is not None else NOTIFY_LOG).append({"message": message})
     return "sent"
 
 
 # ---- Agent 主流程 ----
 
 def run_agent(query: str, context: dict) -> AgentRun:
+    ctx = context or {}
+    bugs = ctx.get("bugs")
+    if not isinstance(bugs, dict):          # 未注入：用模块默认（CLI 单进程跑）
+        bugs = BUGS
+    log = ctx.get("notify_log")
+    if not isinstance(log, list):           # 未注入：落全局日志
+        log = NOTIFY_LOG
+
     calls: list[ToolCallRecord] = []
-    state_snapshot = lambda: {"notify_log": list(NOTIFY_LOG)}
+    state_snapshot = lambda: {"notify_log": list(log)}
 
     q = query.lower()
     # 机型识别：最长匹配优先，避免 "iphone 15" 抢走 "iphone 15 pro"
@@ -75,7 +88,7 @@ def run_agent(query: str, context: dict) -> AgentRun:
         if model is None:
             return AgentRun(query=query, final_output="抱歉，我没识别出机型",
                             tool_calls=calls, state=state_snapshot(), versions=VERSIONS)
-        if BUGS["wrong_tool"]:
+        if bugs["wrong_tool"]:
             # 缺陷：价格问题调成了参数工具
             calls.append(ToolCallRecord("query_product",
                                         {"model": model, "field": "screen"}))
@@ -86,15 +99,15 @@ def run_agent(query: str, context: dict) -> AgentRun:
 
         # 价格场景要发通知（业务规则）。注意：必须真的调用工具，
         # 只记 calls 不调工具，副作用断言（state_after）会抓住它
-        if context.get("notify_required") and not BUGS["skip_notify"]:
+        if ctx.get("notify_required") and not bugs["skip_notify"]:
             calls.append(ToolCallRecord("notify", {"message": f"price_query:{model}"}))
-            tool_notify(f"price_query:{model}")
+            tool_notify(f"price_query:{model}", log)
 
         return AgentRun(query=query, final_output=output,
                         tool_calls=calls, state=state_snapshot(), versions=VERSIONS)
 
     # 未知问题
-    if BUGS["hallucinate"]:
+    if bugs["hallucinate"]:
         return AgentRun(query=query,
                         final_output="这款的电池是 4252mAh，续航 22 小时。",
                         tool_calls=calls, state=state_snapshot(), versions=VERSIONS)

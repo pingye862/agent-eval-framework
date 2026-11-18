@@ -51,10 +51,32 @@ def _load_module(name: str, path: Path):
     return mod
 
 
-demo_adapter_mod = _load_module("demo_adapter", DEMO_DIR / "adapter.py")
-# 注意：adapter.py 内部 `import agent` 走的是 sys.modules 的单例，
-# 这里必须用同一个实例改缺陷开关，不能用 importlib 再加载一份（否则改不动）
+# demo 被测对象：agent.py 是进程内单例，adapter 层不再经 _load_module 加载
+# （DemoScopedAdapter 直接调 run_agent，缺陷开关走 context 注入）
 import agent as demo_agent  # noqa: E402  (来自 DEMO_DIR)
+
+
+class DemoScopedAdapter(AgentAdapter):
+    """demo 专用：缺陷开关与副作用日志随 context 注入，不动模块全局。
+
+    为什么不改全局（BUGS[k] = ... / NOTIFY_LOG.clear()）：server 是
+    ThreadingHTTPServer，并发 /api/run（红绿两种模式）或 /api/health
+    探活与正在跑的批次会互相踩踏全局开关——典型竞态。
+    每次调用注入独立 bugs / notify_log 后，并发跑批互不可见。
+    多轮用例（turns）共享同一份 notify_log（基类 run_turns 透传 context）。
+    """
+
+    def __init__(self, fixed: bool) -> None:
+        self.bugs = {k: (not fixed) for k in demo_agent.BUGS}
+
+    def run(self, query: str, context: dict) -> AgentRun:
+        ctx = dict(context or {})
+        ctx.setdefault("bugs", self.bugs)
+        ctx.setdefault("notify_log", [])
+        return demo_agent.run_agent(query, ctx)
+
+    def health(self) -> bool:
+        return True      # 进程内离线 mock，探活恒绿
 
 # ---------- 注册表 ----------
 
@@ -73,11 +95,9 @@ ADAPTERS = {
 
 def build_adapter(kind: str, fixed: bool):
     if kind == "demo":
-        # 缺陷开关按请求切换；副作用日志清零，避免跨次跑批污染
-        for k in demo_agent.BUGS:
-            demo_agent.BUGS[k] = not fixed
-        demo_agent.NOTIFY_LOG.clear()
-        return demo_adapter_mod.ShoppingAgentAdapter()
+        # 缺陷开关按请求注入 context（见 DemoScopedAdapter），不再改全局——
+        # ThreadingHTTPServer 下并发跑批/探活互不干扰
+        return DemoScopedAdapter(fixed=fixed)
     if kind.startswith("c:"):
         name = kind[2:]
         for p in load_projects():

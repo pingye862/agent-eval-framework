@@ -7,7 +7,7 @@
 1. **批量执行**：评估集（JSON 用例）逐条驱动被测 Agent，每次调用采集完整轨迹（`AgentRun`：最终输出、工具调用、副作用状态、版本信息）；支持多轮对话用例（`turns`，轮次级断言）
 2. **P1 断言**：必调/禁调工具（含参数存在性）、输出关键词、状态断言、异常检测，失败带中文明细
 3. **P2 语义判分（LLM judge）**：用例声明 `judge_criteria`（自然语言判分标准），校准过的 judge 在 L1/L2 层级自动判语义达标；判分器故障降级「需复核」不硬判，未校准自动跳过并标注
-4. **judge 金标校准**：judge 也是模型，不能裸上岗——对人工金标集先过「一致率 ≥85% 且 Spearman ≥0.8」才准参与门禁
+4. **judge 金标校准**：judge 也是模型，不能裸上岗——对人工金标集先过「一致率 ≥85% 且 Cohen's κ ≥0.8」才准参与门禁
 5. **归因双口径**：链路第一错（按断言链路顺序，定位用）+ 主归因层（按 system > trajectory > component 固定优先级从全部失败断言中选，定责用；语义判分失败归 component）
 6. **门禁判定**：blocker 用例一票否决（不参与百分比稀释）+ 成功率回落基线超阈值拦截
 7. **pass^k 复跑与 flaky 检测**：同一用例复跑 k 次，全过才算过；部分通过自动单列为 flaky
@@ -39,7 +39,7 @@ cd webui && python3 server.py   # http://127.0.0.1:8900
 # （仓库自带一份示例），产出 coverage.html
 ```
 
-单测：`python3 -m pytest agent_eval/tests/ -q`（113 条，含 Web 控制台 API 测试）
+单测：`python3 -m pytest agent_eval/tests/ -q`（118 条，含 Web 控制台 API 测试）
 
 ## 接入自己的 Agent
 
@@ -76,7 +76,7 @@ from agent_eval_lib import (BatchRunner, load_evalset,
 judge = SemanticJudge(client=OpenAICompatClient(
     "https://api.deepseek.com/v1/chat/completions", key, "deepseek-chat"))
 
-# 1) 金标校准：200+ 条人工标注，一致率 ≥85% 且 Spearman ≥0.8 才放行
+# 1) 金标校准：200+ 条人工标注，一致率 ≥85% 且 Cohen's κ ≥0.8 才放行
 report = calibrate_judge(machine_labels, human_labels)   # pass/fail 标签序列
 if report.qualified:
     judge.mark_calibrated(report)
@@ -124,7 +124,7 @@ python3 agent_eval/report.py --spec coverage_spec.json --out coverage.html --tex
 ```
 
 > **校准红线**：`--force-uncalibrated` 只为本地演示放行未校准 judge。生产/CI 必须
-> 先跑 `calibrate_judge`（≥200 条人工金标，一致率 ≥85% 且 Spearman ≥0.8），
+> 先跑 `calibrate_judge`（≥200 条人工金标，一致率 ≥85% 且 Cohen's κ ≥0.8），
 > 否则语义断言一律跳过，绝不裸判。Web 控制台同样要求显式传 `force_uncalibrated`。
 
 规格格式（未覆盖单元必须标 6 类原因之一，否则审计不过）：

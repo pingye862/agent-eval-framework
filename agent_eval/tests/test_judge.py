@@ -11,19 +11,28 @@ from harness import (AgentAdapter, AgentRun, BatchRunner, gate_decision)
 from evalset import EvalCase
 from judge import (JudgeError, OpenAICompatClient, SemanticJudge,
                    _parse_verdict, calibrate_judge, load_judge_from_env,
-                   agreement_rate, spearman, JUDGE_SYSTEM_PROMPT)
+                   agreement_rate, cohen_kappa, JUDGE_SYSTEM_PROMPT)
 
 
 # ---------- 校准统计（自 evaluator.py 迁入） ----------
 
-def test_spearman_perfect_and_inverse():
-    assert spearman([1, 2, 3, 4], [1, 2, 3, 4]) == 1.0
-    assert spearman([1, 2, 3, 4], [4, 3, 2, 1]) == -1.0
+def test_cohen_kappa_perfect_and_inverse():
+    assert cohen_kappa([1, 0, 1, 0], [1, 0, 1, 0]) == 1.0
+    assert cohen_kappa([1, 0, 1, 0], [0, 1, 0, 1]) == -1.0   # 完全反向
 
 
-def test_spearman_with_ties():
-    # 人工打分常见 0/0.5/1，并列很多 —— 秩要用平均法
-    assert spearman([1, 1, 0], [1, 1, 0]) == 1.0
+def test_cohen_kappa_corrects_chance_agreement():
+    """一致率 0.9 但全是「机器全判 pass」的碰巧一致 → κ≈0。
+    这正是二值 Spearman 会算出 1.0 假象的场景（秩全并列）。"""
+    human = [1.0] * 90 + [0.0] * 10          # 金标 90% pass
+    machine = [1.0] * 100                     # judge 无脑全 pass
+    assert agreement_rate(machine, human) == 0.9
+    assert cohen_kappa(machine, human) == pytest.approx(0.0)
+
+
+def test_cohen_kappa_both_constant_identical():
+    """双方边际全同标签（全 pass）：完全一致 → κ=1。"""
+    assert cohen_kappa([1.0] * 100, [1.0] * 100) == 1.0
 
 
 def test_agreement_rate():
@@ -100,7 +109,16 @@ def test_judge_prompt_contains_criteria_query_output():
 def test_calibrate_passes_on_perfect_labels():
     human = ["pass"] * 180 + ["fail"] * 20
     rep = calibrate_judge(list(human), human)
-    assert rep.qualified and rep.agreement == 1.0 and rep.spearman == 1.0
+    assert rep.qualified and rep.agreement == 1.0 and rep.kappa == 1.0
+
+
+def test_calibrate_chance_agreement_fails_kappa_gate():
+    """judge 无脑全判 pass：一致率 0.9（过 85% 粗筛）但 κ=0 → 不放行。"""
+    human = ["pass"] * 180 + ["fail"] * 20
+    machine = ["pass"] * 200
+    rep = calibrate_judge(machine, human)
+    assert rep.pass_agreement                    # 一致率 0.9 过粗筛
+    assert not rep.pass_kappa and not rep.qualified   # κ 把碰巧一致拦下
 
 
 def test_calibrate_below_agreement_gate_not_qualified():

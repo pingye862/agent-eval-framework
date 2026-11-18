@@ -139,3 +139,38 @@ def test_ledger_units_is_public_readonly_view():
     assert len(units) == 1 and units[0].unit_id == "U1"
     units.clear()
     assert len(led.units()) == 1, "units() 返回副本，外部改不动账本"
+
+
+# ---------- demo 并发竞态修复（ThreadingHTTPServer 下全局可变状态） ----------
+
+def test_build_adapter_does_not_touch_globals():
+    """构建红/绿两种 adapter 都不再改 agent.BUGS / NOTIFY_LOG 全局。"""
+    import agent as demo_agent
+    before_bugs = dict(demo_agent.BUGS)
+    before_log_len = len(demo_agent.NOTIFY_LOG)
+    server.build_adapter("demo", fixed=True)
+    server.build_adapter("demo", fixed=False)
+    assert demo_agent.BUGS == before_bugs
+    assert len(demo_agent.NOTIFY_LOG) == before_log_len
+
+
+def test_scoped_adapters_isolated_in_concurrent_batches():
+    """红绿两个批次并发跑：BUGS 开关互不可见，结果各自稳定（回归竞态）。"""
+    from concurrent.futures import ThreadPoolExecutor
+    from evalset import load_evalset
+
+    cases = load_evalset(str(server.DEMO_DIR / "evalset.json"))
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        red = pool.submit(lambda: server.BatchRunner(
+            server.build_adapter("demo", fixed=False)).run_all(cases))
+        green = pool.submit(lambda: server.BatchRunner(
+            server.build_adapter("demo", fixed=True)).run_all(cases))
+        red_r, green_r = red.result(), green.result()
+    # 带缺陷批次保持拦截（成功率显著低于修复批次），且互不串扰
+    assert green_r.success_rate == 1.0
+    assert red_r.success_rate < green_r.success_rate
+
+
+def test_demo_health_returns_true():
+    """进程内 demo 探活恒绿（此前 .health() 直接 AttributeError）。"""
+    assert server.build_adapter("demo", fixed=True).health() is True

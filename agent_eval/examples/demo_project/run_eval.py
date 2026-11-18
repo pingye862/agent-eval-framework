@@ -35,11 +35,6 @@ def main() -> int:
                     help="生成覆盖账本审计报告 coverage.html")
     args = ap.parse_args()
 
-    if args.fixed:
-        import agent
-        for k in agent.BUGS:
-            agent.BUGS[k] = False
-
     judge = load_judge_from_env() if args.level != "L0" else None
     if args.level != "L0":
         if judge is None:
@@ -47,7 +42,7 @@ def main() -> int:
         elif not judge.calibrated:
             if args.force_uncalibrated:
                 print("⚠ 仅为本地演示放行未校准 judge——生产环境必须先跑金标集校准"
-                      "（calibrate_judge：一致率 ≥85% 且 Spearman ≥0.8）")
+                      "（calibrate_judge：一致率 ≥85% 且 Cohen's κ ≥0.8）")
                 judge.mark_calibrated()
             else:
                 print("⚠ judge 未通过金标校准，P2 语义判分跳过并标注。"
@@ -55,8 +50,11 @@ def main() -> int:
 
     cases = load_evalset(args.evalset)
     adapter_cls = __import__("adapter").ShoppingAgentAdapter
+    # --fixed 不再改 agent.BUGS 全局（多线程跑批有竞态），改为按 context 注入
+    context = ({"bugs": {k: False for k in __import__("agent").BUGS}}
+               if args.fixed else None)
     report = BatchRunner(adapter_cls(), judge=judge).run_all(
-        cases, level=args.level)
+        cases, level=args.level, context=context)
     print(report.text())
 
     if args.coverage:
