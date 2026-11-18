@@ -3,7 +3,7 @@
 你的项目只需要做一件事：实现 AgentAdapter，把每次调用包装成 AgentRun。
 其余的（P1 断言、批量执行、失败归因、门禁判定、报告）都由这里负责。
 
-对应方案：4.5 断言三类型 / 6 分层执行 / 7.1 合并门禁 / 方法二 4.8 链路第一错。
+能力覆盖：断言三类型 / 分层执行 / 合并门禁 / 链路第一错归因。
 """
 from __future__ import annotations
 
@@ -322,7 +322,7 @@ class BatchRunner:
         return EvalReport(level=level, outcomes=outcomes, repeat=repeat)
 
 
-# ---------- 门禁判定（对应方案 7.1，baseline 由调用方传入） ----------
+# ---------- 门禁判定（baseline 由调用方传入） ----------
 
 def gate_decision(report: EvalReport, baseline_rate: Optional[float] = None,
                   drop_pp: float = 2.0) -> tuple[bool, list[str]]:
@@ -339,7 +339,7 @@ def gate_decision(report: EvalReport, baseline_rate: Optional[float] = None,
     return (len(reasons) == 0), reasons
 
 
-# ---------- 快照落盘与报告对比（方法二 4.9/4.11 接入主链路） ----------
+# ---------- 快照落盘与报告对比（回放门禁接入主链路） ----------
 
 def _runs_of(outcome: CaseOutcome) -> list[AgentRun]:
     """取出一次执行的全部轮次轨迹（多轮取 runs，单轮兜底 [run]）。"""
@@ -386,7 +386,7 @@ def write_snapshots(path: str | Path, report: EvalReport) -> int:
 def compare_reports(old: dict, new: dict) -> dict:
     """对比两份跑批报告 JSON，返回差异摘要 + 回放四档判定。
 
-    四档判定复用 ReplayRunner 的阈值（方法二 4.11）：
+    四档判定复用 ReplayRunner 的阈值：
     |Δ|≤3pp 视为噪声本次作废；Δ≥+10pp 提升可合并；Δ≤-20pp 显著下降需排查；
     其余为保持不合并。
     """

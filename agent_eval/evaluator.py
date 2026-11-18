@@ -1,11 +1,11 @@
 """评估器骨架 + 一致率校准。
 
 对应文档：
-- 4.4 分维度精评：6 个维度，5 个有可用提示词（意图理解 / 知识召回 / 表达质量 /
+- 分维度精评：6 个维度，5 个有可用提示词（意图理解 / 知识召回 / 表达质量 /
   信息准确性 / 兜底质量），实时数据一致性不走离线评测
 - 4.5 权重与路由归一化
-- 5.2 金标集校准：机器评判先过一致率门槛，才准上岗；季度复校
-- 文档 2.2：证据不足输出「需复核」，不硬判
+- 金标集校准：机器评判先过一致率门槛，才准上岗；定期复校
+- 证据不足输出「需复核」，不硬判
 """
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ class DimEvaluator:
         if not self.calibrated:
             raise RuntimeError(
                 f"维度 {self.dim} 未通过金标集校准，不能参与评分"
-                "（文档 5.2：先校准再托管）"
+                "（先校准再托管）"
             )
         verdict, evidence = self.client.judge(self.dim, self.prompt_version, snapshot)
         w = EVAL_DIMS[self.dim]["weight"]
@@ -92,7 +92,7 @@ class Router:
 # ---------- 权重归一化 + 综合分 ----------
 
 def normalize_weights(results: list[DimResult]) -> list[DimResult]:
-    """方法二 4.5：没触发的维度不参与计算，剩余权重等比例放大到 1.0。"""
+    """没触发的维度不参与计算，剩余权重等比例放大到 1.0。"""
     triggered = [d for d in results if d.triggered]
     total = sum(d.weight for d in triggered)
     if total == 0:
@@ -159,9 +159,9 @@ class CalibrationReport:
 
 
 def calibrate(dim: str, machine_scores: list[float], human_scores: list[float]) -> CalibrationReport:
-    """金标集校准。门槛来自文档 5.2：一致率 ≥85%，Spearman ≥0.8。"""
+    """金标集校准。上岗门槛：一致率 ≥85%，Spearman ≥0.8。"""
     if len(machine_scores) < 200:
-        # 文档 5.2：金标集 200-500 条。少于 200 不给上岗，防止小样本过拟合。
+        # 金标集建议 200-500 条。少于 200 不给上岗，防止小样本过拟合。
         raise ValueError(f"金标集不足 200 条（当前 {len(machine_scores)}），不能校准")
     ag = agreement_rate(machine_scores, human_scores)
     sp = spearman(machine_scores, human_scores)
@@ -181,7 +181,7 @@ def calibrate(dim: str, machine_scores: list[float], human_scores: list[float]) 
 # ---------- 证据不足的降级 ----------
 
 def needs_review(result: CaseResult, reason: str) -> CaseResult:
-    """文档 2.2：证据不足 → 「需复核」，不硬判。打上标记后转人工队列。"""
+    """证据不足 → 「需复核」，不硬判。打上标记后转人工队列。"""
     result.routed_to_human = True
     for d in result.dim_results:
         if not d.evidence:

@@ -6,7 +6,7 @@
 API：
     GET  /                     前端页面
     GET  /api/meta             评估集与适配器清单（含各自可用适配器）
-    GET  /api/health?adapter=  检测某适配器是否在线（w03-live 用）
+    GET  /api/health?adapter=  检测某适配器是否在线（HTTP 型被测对象用）
     POST /api/run              跑批：{evalset, adapter, fixed, baseline}
     GET  /api/cases?path=      读评估集全部用例（path 必须已注册）
     POST /api/cases            新增用例：{path, case}
@@ -25,19 +25,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
-BASE = Path(__file__).resolve().parent.parent          # Agent测试方案/
+BASE = Path(__file__).resolve().parent.parent          # 仓库根目录
 AGENT_EVAL = BASE / "agent_eval"
 DEMO_DIR = AGENT_EVAL / "examples" / "demo_project"
-W03_DIR = BASE / "fde-w03-integration"
 WEBUI_DIR = Path(__file__).resolve().parent
 PROJECTS_FILE = WEBUI_DIR / "projects.json"            # 手动添加的项目注册表
 
-# sys.path 顺序有讲究：w03 在前，让 selfcheck_offline 内部的
-# `from adapter import W03AgentAdapter` 解析到 w03 的 adapter；
-# demo 的 adapter 用 importlib 按文件路径显式加载，不走名字解析。
 sys.path.insert(0, str(AGENT_EVAL))
-sys.path.insert(1, str(W03_DIR))
-sys.path.insert(2, str(DEMO_DIR))
+sys.path.insert(1, str(DEMO_DIR))
 
 from evalset import load_evalset                      # noqa: E402
 from harness import (BatchRunner, gate_decision, write_snapshots,   # noqa: E402
@@ -57,8 +52,6 @@ demo_adapter_mod = _load_module("demo_adapter", DEMO_DIR / "adapter.py")
 # 注意：adapter.py 内部 `import agent` 走的是 sys.modules 的单例，
 # 这里必须用同一个实例改缺陷开关，不能用 importlib 再加载一份（否则改不动）
 import agent as demo_agent  # noqa: E402  (来自 DEMO_DIR)
-w03_adapter_mod = _load_module("w03_adapter", W03_DIR / "adapter.py")
-w03_stub_mod = _load_module("w03_selfcheck", W03_DIR / "selfcheck_offline.py")
 
 # ---------- 注册表 ----------
 
@@ -68,22 +61,10 @@ EVALSETS = {
         "path": str(DEMO_DIR / "evalset.json"),
         "adapters": ["demo"],
     },
-    "w03-smoke": {
-        "label": "梧桐冒烟集（4 条：ok/澄清/拒答三态）",
-        "path": str(W03_DIR / "evalset_w03_smoke.json"),
-        "adapters": ["w03-stub", "w03-live"],
-    },
-    "w03-full": {
-        "label": "梧桐全量集（18 条，blocker 4）",
-        "path": str(W03_DIR / "evalset_w03.json"),
-        "adapters": ["w03-stub", "w03-live"],
-    },
 }
 
 ADAPTERS = {
     "demo": {"label": "示例 Agent（进程内，离线）"},
-    "w03-stub": {"label": "梧桐·契约桩（离线演示，恒绿）"},
-    "w03-live": {"label": "梧桐·真实服务 127.0.0.1:8765"},
 }
 
 
@@ -94,10 +75,6 @@ def build_adapter(kind: str, fixed: bool):
             demo_agent.BUGS[k] = not fixed
         demo_agent.NOTIFY_LOG.clear()
         return demo_adapter_mod.ShoppingAgentAdapter()
-    if kind == "w03-stub":
-        return w03_stub_mod.StubAdapter(w03_stub_mod.FIXTURES)
-    if kind == "w03-live":
-        return w03_adapter_mod.W03AgentAdapter()
     if kind.startswith("c:"):
         name = kind[2:]
         for p in load_projects():
@@ -480,7 +457,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:                       # noqa: BLE001
                 self._json({"ok": False, "detail": str(e)})
                 return
-            hint = "" if ok else "服务未启动：先跑 start_service.sh（需先配 FDE_MODEL_* 并 load 指标库）"
+            hint = "" if ok else "服务未启动或 health 探活失败：检查被测服务是否在线（可在注册项目时配置 health_url 探活地址）"
             self._json({"ok": bool(ok), "detail": hint})
             return
         self._json({"error": "not found"}, 404)
@@ -548,10 +525,6 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         adapter = build_adapter(adapter_kind, fixed)
-        if adapter_kind == "w03-live" and not adapter.health():
-            self._json({"error": "W03 服务不在线。先配 FDE_MODEL_* 环境变量并运行 start_service.sh",
-                        "hint": "或改用「梧桐·契约桩」先看流程"}, 409)
-            return
         if adapter_kind.startswith("c:"):
             hf = getattr(adapter, "health", None)      # python 型适配器可能没实现探活
             if hf and not hf():

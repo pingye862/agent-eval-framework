@@ -250,7 +250,7 @@
           <div class="field"><label>负责人 owner（可空）</label><input type="text" id="c_owner" placeholder="eval-owner"></div>
         </div>
         <div class="field" style="margin-top:10px"><label>测试问题 query（发给被测 Agent 的话）</label>
-          <textarea id="c_query" rows="2" placeholder="2026 年 8 月梧桐书店扣退后收入是多少？"></textarea></div>
+          <textarea id="c_query" rows="2" placeholder="例如：帮我推荐一台 5000 元以内、适合剪辑视频的笔记本，并说明理由"></textarea></div>
         <div class="grid2" style="margin-top:10px">
           <div class="field"><label>答案必须包含的关键词（逗号分隔，可空）</label>
             <input type="text" id="c_contains" placeholder="130, 收入"></div>
@@ -600,7 +600,7 @@ function onAdapterChange() {
   const a = $('adapter').value;
   const isCustomHttp = a.startsWith('c:') && customType(a) === 'http';
   $('fixedWrap').style.display = a === 'demo' ? 'flex' : 'none';
-  $('healthBtn').style.display = (a === 'w03-live' || isCustomHttp) ? 'inline-block' : 'none';
+  $('healthBtn').style.display = isCustomHttp ? 'inline-block' : 'none';
 }
 
 const customType = id => { const p = PROJECTS.find(x => 'c:' + x.name === id); return p ? p.adapter_type : ''; };

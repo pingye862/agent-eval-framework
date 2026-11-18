@@ -1,6 +1,6 @@
 # agent_eval
 
-把《Agent 质量评测方法论总结》落成可执行的测试代码。
+把一套可落地的 Agent 质量评测方法论变成可执行的测试代码。
 
 ## 目录结构
 
@@ -57,7 +57,7 @@ class MyAgentAdapter(AgentAdapter):
         )
 ```
 
-**第 2 步：准备评估集**（JSON，格式对应方案 4.4，参考 `evalset.json`）
+**第 2 步：准备评估集**（JSON，参考 `evalset.json`）
 
 关键字段：`severity`（blocker 一票否决）、`must_call` / `must_not_call`（轨迹断言）、
 `response_contains`（结果断言）、`state_after`（副作用断言）、`context_overrides`（用例级前置状态）。
@@ -85,15 +85,15 @@ python3 run_eval.py --gate --baseline 0.95   # 门禁模式：比基线掉 2pp �
 | `evalset.py` | 评估集加载（缺必填字段直接报错，半成品进不了门禁） |
 | `models.py` / `attribution.py` / `evaluator.py` / `replay.py` / `coverage.py` / `runner.py` | 方法论内核（见下表） |
 
-## 与文档章节的对应
+## 核心模块说明
 
-| 代码 | 文档章节 |
+| 代码 | 设计要点 |
 |---|---|
-| `coverage.py` | 3.2 覆盖单元 / 3.8 覆盖账本与 6 类未覆盖原因 |
-| `attribution.py` | 方法一 3.6 三层单归因 / 方法二 4.8 链路第一错 |
-| `evaluator.py` | 4.4 分维度精评 / 4.5 权重与路由 / 5.2 金标集校准 |
-| `replay.py` | 4.9 快照 / 4.10 回放三种情形 / 4.11 回放门禁 |
-| `runner.py` | 4.1–4.3 全量埋点 → 投票粗筛 → 精评 → 人工 |
+| `coverage.py` | 覆盖单元 / 覆盖账本与 6 类未覆盖原因（只标注、不删除） |
+| `attribution.py` | 三层单归因（系统/轨迹/组件只认一层）/ 链路第一错 |
+| `evaluator.py` | 分维度精评 / 权重与路由 / 金标集校准 |
+| `replay.py` | 快照 / 回放三种情形（换提示词、换模型、换知识库）/ 回放门禁四档 |
+| `runner.py` | 全量埋点 → 多模型投票粗筛 → 精评 → 人工 |
 
 ## Web 控制台
 
@@ -101,8 +101,8 @@ python3 run_eval.py --gate --baseline 0.95   # 门禁模式：比基线掉 2pp �
 python3 webui/server.py        # → http://127.0.0.1:8900（纯标准库，无新增依赖）
 ```
 
-三个被测对象开箱即用：demo 示例（缺陷/修复红→绿切换）、梧桐契约桩（18 条离线全量）、
-梧桐真实服务（需先 `start_service.sh`，页面内有连通检测按钮）。
+开箱即用：demo 示例（缺陷/修复红→绿切换）。其他被测对象通过「➕ 自定义项目」接入
+（HTTP 服务或 Python 适配器，注册后出现在评估集与被测对象下拉里）。
 
 ### 手动接入新项目（不改代码）
 

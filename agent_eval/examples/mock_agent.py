@@ -57,7 +57,7 @@ class MockAgent:
         return steps
 
     def diagnose(self, query: str) -> dict:
-        """跑一遍链路 → 找第一错 → 单归因。这就是方法二 4.8 + 方法一 3.6 的落地。"""
+        """跑一遍链路 → 找第一错 → 单归因。"""
         steps = self.run(query)
         finder = FirstErrorFinder(steps)
         first = finder.find()

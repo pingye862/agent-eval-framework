@@ -1,7 +1,7 @@
 """CI 门禁（L0）：这就是接入你项目 CI 的那个文件。
 
 GitHub Actions / Jenkins / GitLab CI 里加一步 `pytest test_gate.py`，
-红 = 不许合并。blocker 一票否决，不参与百分比稀释（方案 7.1）。
+红 = 不许合并。blocker 一票否决，不参与百分比稀释。
 """
 import sys
 import os

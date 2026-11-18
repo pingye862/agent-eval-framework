@@ -1,11 +1,11 @@
 """数据模型。
 
 对应文档：
-- 覆盖单元 / 三层评测 —— 方法一 3.2
-- 用例资产 —— 方法一 3.3
-- 未覆盖原因 6 类 —— 方法一 3.8
-- 快照 —— 方法二 4.9
-- 判定 0/1 或 0/0.5/1 —— 方法二 4.6
+- 覆盖单元 / 三层评测
+- 用例资产
+- 未覆盖原因 6 类
+- 快照
+- 判定 0/1 或 0/0.5/1
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from typing import Any, Optional
 
 
 class EvalLayer(enum.Enum):
-    """三层评测。方法一 3.2：系统级默认，轨迹级需可观测，组件级需用户确认。"""
+    """三层评测。系统级默认，轨迹级需可观测，组件级需用户确认。"""
 
     SYSTEM = "system"
     TRAJECTORY = "trajectory"
@@ -23,7 +23,7 @@ class EvalLayer(enum.Enum):
 
 
 class NotCoveredReason(enum.Enum):
-    """覆盖账本中未覆盖单元的 6 类原因。方法一 3.8：只标注，不删除。"""
+    """覆盖账本中未覆盖单元的 6 类原因。只标注，不删除。"""
 
     PENDING_CLARIFICATION = "待澄清"          # 依赖澄清结果
     PENDING_DATA = "待补数据"                  # 证据缺口待补
@@ -34,7 +34,7 @@ class NotCoveredReason(enum.Enum):
 
 
 class AttributionLayer(enum.Enum):
-    """主归因层。一个失败只归因一层（方法一 3.6 / 方法二 4.8）。"""
+    """主归因层。一个失败只归因一层。"""
 
     SYSTEM = "system"        # 召回 / 知识片段 / 快照等系统能力
     TRAJECTORY = "trajectory"  # 意图识别、工具选择、执行路径
@@ -42,7 +42,7 @@ class AttributionLayer(enum.Enum):
 
 
 class Verdict(enum.Enum):
-    """单维度判定。方法二 4.6：0/1，或人工评判的 0/0.5/1。"""
+    """单维度判定：0/1，或人工评判的 0/0.5/1。"""
 
     PASS = 1.0
     PARTIAL = 0.5
@@ -50,7 +50,7 @@ class Verdict(enum.Enum):
 
 
 class GateVerdict(enum.Enum):
-    """回放门禁。方法二 4.11 的四档。"""
+    """回放门禁四档判定。"""
 
     PROMOTE = "提升可合并"
     HOLD = "保持不合并"
@@ -60,7 +60,7 @@ class GateVerdict(enum.Enum):
 
 @dataclass
 class CoverageUnit:
-    """覆盖单元：评测的最小设计单位（方法一 3.2）。"""
+    """覆盖单元：评测的最小设计单位。"""
 
     unit_id: str
     description: str
@@ -73,7 +73,7 @@ class CoverageUnit:
 
 @dataclass
 class TestCase:
-    """用例资产。方法一 3.3。"""
+    """用例资产。"""
 
     case_id: str
     unit_id: str
@@ -88,7 +88,7 @@ class TestCase:
 
 @dataclass
 class Snapshot:
-    """快照（方法二 4.9）。回放的确定性来源。"""
+    """快照。回放的确定性来源。"""
 
     trace_id: str
     query: str
@@ -110,7 +110,7 @@ class DimResult:
     score: float                 # 1.0 / 0.5 / 0.0
     triggered: bool = True       # 路由是否触发该维度
     evidence: list[str] = field(default_factory=list)
-    need_review: bool = False    # 证据不足，转人工（文档 2.2）
+    need_review: bool = False    # 证据不足，转人工
     weight: float = 0.0
 
 
@@ -121,7 +121,7 @@ class CaseResult:
     trace_id: str
     dim_results: list[DimResult] = field(default_factory=list)
     composite: Optional[float] = None        # 路由归一化后的综合分
-    first_error_step: Optional[str] = None   # 链路第一错（方法二 4.8）
+    first_error_step: Optional[str] = None   # 链路第一错
     attribution: Optional[AttributionLayer] = None
     routed_to_human: bool = False
     human_score: Optional[float] = None

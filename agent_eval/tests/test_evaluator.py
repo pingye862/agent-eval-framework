@@ -57,7 +57,7 @@ def test_agreement_rate():
 
 
 def test_calibrate_rejects_small_golden_set():
-    # 金标集 < 200 条不允许上岗（文档 5.2）
+    # 金标集 < 200 条不允许上岗
     with pytest.raises(ValueError):
         calibrate("intent", [1.0] * 100, [1.0] * 100)
 

@@ -1,6 +1,6 @@
 """分层判卷 runner。
 
-对应文档方法二 4.1–4.3：
+执行流程：
 - 全量 Query 埋点采集（零判定成本，只做记录）
 - 多模型投票粗筛（3 个不同系列的模型，2/3 否决）
 - 重点 Query 按评分细则分维度精评（路由决定跑哪些）
@@ -106,7 +106,7 @@ class EvalPipeline:
         return Verdict.PASS
 
     def replay_reflow(self, failed: PipelineResult) -> dict:
-        """缺陷样本回流（方法一 3.7）。
+        """缺陷样本回流：
 
         failed: 精评或人工判失败的样本
         返回一条补录用例的建议，交给方法一的资产生成阶段。

@@ -4,11 +4,13 @@
 
 ## 它做什么
 
-1. **批量执行**：评估集（JSON 用例）逐条驱动被测 Agent，每次调用采集完整轨迹（`AgentRun`：最终输出、工具调用、副作用状态、版本信息）
+1. **批量执行**：评估集（JSON 用例）逐条驱动被测 Agent，每次调用采集完整轨迹（`AgentRun`：最终输出、工具调用、副作用状态、版本信息）；支持多轮对话用例（`turns`，轮次级断言）
 2. **P1 断言**：必调/禁调工具（含参数存在性）、输出关键词、状态断言、异常检测，失败带中文明细
 3. **第一错归因**：失败用例自动定位链路第一错，归因到 system / trajectory / component 层
 4. **门禁判定**：blocker 用例一票否决（不参与百分比稀释）+ 成功率回落基线超阈值拦截
-5. **Web 控制台**：评估集增删改查、自定义项目注册、跑批与报告展示（零依赖，纯标准库 HTTP server）
+5. **pass^k 复跑与 flaky 检测**：同一用例复跑 k 次，全过才算过；部分通过自动单列为 flaky
+6. **快照回放**：轨迹自动落 JSONL 快照，`--compare` 对比新旧报告给出四档判定（可合并/不合并/需排查/环境不稳作废）
+7. **Web 控制台**：评估集增删改查、自定义项目注册（HTTP/Python 适配器）、跑批与报告展示（零依赖，纯标准库 HTTP server）
 
 ## 目录结构
 
@@ -53,20 +55,14 @@ class MyAdapter(AgentAdapter):
 
 评估集格式见 `agent_eval/README.md`（blocker / major / minor 分层出题法，金标集人工确认）。
 
-## 运行环境已知坑（WorkBuddy 沙箱内跑服务）
-
-- 启动被测服务前 `unset PYTHONPATH`（WorkBuddy 注入的 sitecustomize 会劫持 `mkdir`，导致 `mkdir(exist_ok=True)` 在目录已存在时仍抛异常）
-- 本机 curl 加 `--noproxy '*'`；urllib 用 `ProxyHandler({})` 直连 opener
-- 启动脚本自愈写法：启动前先 `unset PYTHONPATH PYTHONSTARTUP`
-
 ## 环境变量
 
 被测 Agent 需要模型 API key 时，统一走环境变量：
 
 ```
-FDE_MODEL_URL=https://api.deepseek.com/v1/chat/completions
-FDE_MODEL_NAME=deepseek-chat
-FDE_MODEL_KEY=<你的 key>
+EVAL_MODEL_URL=https://api.deepseek.com/v1/chat/completions
+EVAL_MODEL_NAME=deepseek-chat
+EVAL_MODEL_KEY=<你的 key>
 ```
 
 **key 只放环境变量，不进代码、不进仓库**（`.gitignore` 已排除 `model_env.sh`）。

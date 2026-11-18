@@ -1,6 +1,6 @@
 """评估集加载与校验。
 
-评估集文件格式与方案 4.4 的 YAML schema 对应，JSON 化（零依赖）。
+评估集文件格式：JSON 化 schema（零依赖），字段说明见 README。
 支持字段见 EvalCase；缺必填字段直接报错，防止半成品评估集混进门禁。
 """
 from __future__ import annotations
