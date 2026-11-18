@@ -20,6 +20,7 @@
 ```
 agent_eval/               评测框架（9 模块 + 单测 + demo 示例项目）
 webui/                    评测控制台（python3 webui/server.py 启动，默认 8900 端口）
+docs/                     小白上手指南（getting-started-zh.md，10 分钟跑通第一份报告）
 ```
 
 **模块定位（重要）**：主链路是 `harness.py`（P1 断言 + 批量执行 + 归因 + 门禁）与
@@ -27,6 +28,9 @@ webui/                    评测控制台（python3 webui/server.py 启动，默
 为活代码。仓库不含未接线的「参考实现」——每个模块都在主链路上。
 
 ## 快速开始
+
+> **第一次用？先看 [小白上手指南](docs/getting-started-zh.md)**——从零到跑通
+> 第一份测试报告，每步带可复制命令和输出解读。
 
 ```bash
 # 1. 跑 demo 示例（内置可控缺陷的被测 Agent，无需任何外部服务）
