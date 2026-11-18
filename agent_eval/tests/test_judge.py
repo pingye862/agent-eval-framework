@@ -11,7 +11,23 @@ from harness import (AgentAdapter, AgentRun, BatchRunner, gate_decision)
 from evalset import EvalCase
 from judge import (JudgeError, OpenAICompatClient, SemanticJudge,
                    _parse_verdict, calibrate_judge, load_judge_from_env,
-                   JUDGE_SYSTEM_PROMPT)
+                   agreement_rate, spearman, JUDGE_SYSTEM_PROMPT)
+
+
+# ---------- 校准统计（自 evaluator.py 迁入） ----------
+
+def test_spearman_perfect_and_inverse():
+    assert spearman([1, 2, 3, 4], [1, 2, 3, 4]) == 1.0
+    assert spearman([1, 2, 3, 4], [4, 3, 2, 1]) == -1.0
+
+
+def test_spearman_with_ties():
+    # 人工打分常见 0/0.5/1，并列很多 —— 秩要用平均法
+    assert spearman([1, 1, 0], [1, 1, 0]) == 1.0
+
+
+def test_agreement_rate():
+    assert agreement_rate([1, 0, 1, 1], [1, 0, 0, 1]) == 0.75
 
 
 class FakeClient:

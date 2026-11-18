@@ -8,7 +8,7 @@
 2. **P1 断言**：必调/禁调工具（含参数存在性）、输出关键词、状态断言、异常检测，失败带中文明细
 3. **P2 语义判分（LLM judge）**：用例声明 `judge_criteria`（自然语言判分标准），校准过的 judge 在 L1/L2 层级自动判语义达标；判分器故障降级「需复核」不硬判，未校准自动跳过并标注
 4. **judge 金标校准**：judge 也是模型，不能裸上岗——对人工金标集先过「一致率 ≥85% 且 Spearman ≥0.8」才准参与门禁
-5. **第一错归因**：失败用例自动定位链路第一错，归因到 system / trajectory / component 层（语义判分失败归 component）
+5. **归因双口径**：链路第一错（按断言链路顺序，定位用）+ 主归因层（按 system > trajectory > component 固定优先级从全部失败断言中选，定责用；语义判分失败归 component）
 6. **门禁判定**：blocker 用例一票否决（不参与百分比稀释）+ 成功率回落基线超阈值拦截
 7. **pass^k 复跑与 flaky 检测**：同一用例复跑 k 次，全过才算过；部分通过自动单列为 flaky
 8. **快照回放**：轨迹自动落 JSONL 快照，`--compare` 对比新旧报告给出四档判定（可合并/不合并/需排查/环境不稳作废）
@@ -18,14 +18,13 @@
 ## 目录结构
 
 ```
-agent_eval/               评测框架（11 模块 + 单测 + demo 示例项目）
+agent_eval/               评测框架（9 模块 + 单测 + demo 示例项目）
 webui/                    评测控制台（python3 webui/server.py 启动，默认 8900 端口）
 ```
 
-**模块定位（重要）**：主链路是 `harness.py`（P1 断言 + 批量执行 + 门禁）与 `judge.py`
-（P2 语义判分）。`evaluator.py` / `runner.py` 是「分维度精评 + 多模型投票粗筛」的
-**参考实现，当前未接入主链路**；它们的校准函数（`agreement_rate` / `spearman` /
-`calibrate`）被 `judge.py` 复用。`coverage.py` / `report.py` / `replay.py` 为活代码。
+**模块定位（重要）**：主链路是 `harness.py`（P1 断言 + 批量执行 + 归因 + 门禁）与
+`judge.py`（P2 语义判分 + 金标校准统计）。`coverage.py` / `report.py` / `replay.py`
+为活代码。仓库不含未接线的「参考实现」——每个模块都在主链路上。
 
 ## 快速开始
 
@@ -40,7 +39,7 @@ cd webui && python3 server.py   # http://127.0.0.1:8900
 # （仓库自带一份示例），产出 coverage.html
 ```
 
-单测：`python3 -m pytest agent_eval/tests/ -q`（116 条，含 Web 控制台 API 测试）
+单测：`python3 -m pytest agent_eval/tests/ -q`（113 条，含 Web 控制台 API 测试）
 
 ## 接入自己的 Agent
 

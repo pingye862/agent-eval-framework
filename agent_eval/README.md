@@ -6,16 +6,18 @@
 
 ```
 agent_eval/
-├── models.py            数据模型：覆盖单元 / 用例 / 评估结果 / 快照
+├── models.py            数据模型：覆盖单元 / 快照 / 归因层 / 门禁判定
 ├── coverage.py          覆盖账本 + 6 类未覆盖原因 + 覆盖率审计
 ├── attribution.py       归因引擎：三层只认一个主归因 + 链路第一错
-├── evaluator.py         评估器骨架 + 一致率校准（金标集驱动）
+├── judge.py             P2 语义判分 + 金标校准统计（一致率 / Spearman）
+├── harness.py           执行器：P1 断言 + 跑批 + 归因 + 门禁
+├── evalset.py           评估集加载
 ├── replay.py            快照管理 + 单变量回放（3 种情形 + 门禁）
-├── runner.py            分层判卷：粗筛（多模型投票）→ 精评 → 人工
+├── report.py            覆盖账本可视化（HTML 审计报告）
 ├── tests/
 │   ├── test_attribution.py
 │   ├── test_coverage.py
-│   ├── test_evaluator.py
+│   ├── test_harness.py
 │   └── test_replay.py
 ├── examples/
 │   └── mock_agent.py    虚构的数码商品导购 Agent（带可控缺陷）
@@ -26,7 +28,7 @@ agent_eval/
 
 ```bash
 cd agent_eval
-python -m pytest tests/ -v          # 框架自身单元测试（30 个）
+python -m pytest tests/ -v          # 框架自身单元测试（与 webui 测试合计 113 条）
 
 # 完整接入示例（推荐先跑这个）
 cd examples/demo_project
@@ -82,11 +84,11 @@ python3 run_eval.py --gate --baseline 0.95   # 门禁模式：比基线掉 2pp �
 | 代码 | 作用 |
 |---|---|
 | `agent_eval_lib.py` | 门面，外部项目只 import 它 |
-| `harness.py` | 执行器：AgentAdapter 协议 + P1 断言 + P2 语义判分接入 + 跑批 + 门禁判定 |
+| `harness.py` | 执行器：AgentAdapter 协议 + P1 断言 + P2 语义判分接入 + 跑批 + 归因 + 门禁判定 |
 | `judge.py` | P2 语义判分：LLM judge + 金标校准（一致率 ≥85% 且 Spearman ≥0.8 才上岗） |
 | `report.py` | 覆盖账本可视化：单文件 HTML 审计报告（按层拆解 / 6 类原因 / 高风险红线） |
 | `evalset.py` | 评估集加载（缺必填字段直接报错，半成品进不了门禁） |
-| `models.py` / `attribution.py` / `evaluator.py` / `replay.py` / `coverage.py` / `runner.py` | 方法论内核（见下表） |
+| `models.py` / `attribution.py` / `replay.py` / `coverage.py` | 方法论内核（见下表） |
 
 ## 核心模块说明
 
@@ -94,9 +96,7 @@ python3 run_eval.py --gate --baseline 0.95   # 门禁模式：比基线掉 2pp �
 |---|---|
 | `coverage.py` | 覆盖单元 / 覆盖账本与 6 类未覆盖原因（只标注、不删除） |
 | `attribution.py` | 三层单归因（系统/轨迹/组件只认一层）/ 链路第一错 |
-| `evaluator.py` | 分维度精评 / 权重与路由 / 金标集校准 |
 | `replay.py` | 快照 / 回放三种情形（换提示词、换模型、换知识库）/ 回放门禁四档 |
-| `runner.py` | 全量埋点 → 多模型投票粗筛 → 精评 → 人工 |
 
 ## Web 控制台
 

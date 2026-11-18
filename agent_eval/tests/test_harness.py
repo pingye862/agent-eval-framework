@@ -69,6 +69,48 @@ def test_agent_error_short_circuits():
     assert r.attribution == "system"
 
 
+# ---------- 归因口径：第一错（链路顺序）≠ 主归因层（优先级） ----------
+
+def test_attribution_priority_over_first_error():
+    """must_call(trajectory) 与 state_after(system) 同时挂：
+    链路第一错是 must_call，但主归因层按 system > trajectory 优先级取 system。
+    系统层是上游，修好它，下游轨迹错往往跟着消失。"""
+    class Adapter(AgentAdapter):
+        def run(self, query, context):
+            return AgentRun(query=query, final_output="done",
+                            state={"log": []})
+
+    r = BatchRunner(Adapter()).run_case(
+        _case(must_call=[{"tool": "run_sql"}],
+              state_after=[{"path": "log", "min_length": 1}]))
+    assert not r.passed
+    assert r.first_error.target == "must_call"          # 链路第一错：定位用
+    assert r.attribution == "system"                    # 主归因层：定责用
+
+
+def test_attribution_single_layer_no_promotion():
+    """只有 trajectory 层挂时，主归因就是 trajectory（不误抬到 system）。"""
+    a = StubAdapter({"q": {"output": "好的", "tools": []}})
+    r = BatchRunner(a).run_case(_case(must_call=[{"tool": "run_sql"}]))
+    assert not r.passed
+    assert r.attribution == "trajectory"
+
+
+def test_attribution_semantic_fail_is_component():
+    """语义断言失败归 component 层（判分对象是提示词与回答行为）。"""
+    class FakeJudge:
+        calibrated = True
+
+        def judge(self, query, criteria, output):
+            return {"verdict": "fail", "evidence": ["答非所问"]}
+
+    a = StubAdapter({"q": {"output": "不知道"}})
+    r = BatchRunner(a, judge=FakeJudge()).run_case(
+        _case(judge_criteria=["必须回答商品数量"]), level="L1")
+    assert not r.passed
+    assert r.attribution == "component"
+
+
 def test_must_not_call_and_contains():
     a = StubAdapter({"q": {"output": "含答案关键词", "tools": ["delete_record"]}})
     r = BatchRunner(a).run_case(

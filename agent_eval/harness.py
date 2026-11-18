@@ -3,7 +3,7 @@
 你的项目只需要做一件事：实现 AgentAdapter，把每次调用包装成 AgentRun。
 其余的（P1 断言、批量执行、失败归因、门禁判定、报告）都由这里负责。
 
-能力覆盖：断言三类型 / 分层执行 / 合并门禁 / 链路第一错归因。
+能力覆盖：断言三类型 / 分层执行 / 合并门禁 / 链路第一错与主归因层。
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from attribution import FirstErrorFinder, TraceStep
+from attribution import FirstErrorFinder, TraceStep, single_attribution
 from evalset import EvalCase
 from models import AttributionLayer
 
@@ -339,16 +339,24 @@ class BatchRunner:
         results += self._semantic_assertions(case, all_runs, level)
         passed = all(r.ok for r in results if not r.skipped)
 
+        # 两个独立的归因口径，别混：
+        # - first_error（链路第一错）：按断言链路顺序取第一个失败环节 —— 定位用
+        # - attribution（主归因层）：按 single_attribution 的固定优先级
+        #   system > trajectory > component 从全部失败断言中选 —— 定责用。
+        #   例：must_call(trajectory) 与 state_after(system) 同时挂，主归因是 system：
+        #   系统层（状态/知识/召回）是上游，修好它，下游轨迹错往往跟着消失。
         first_error, attribution = None, None
         if not passed:
+            failed_layers = {r.layer for r in results if not r.ok}
+            if failed_layers:
+                attribution = single_attribution(
+                    {layer: True for layer in failed_layers}).value
             steps = [
                 TraceStep(step_id=f"{i}_{r.kind}", method="rule_check",
                           target=r.kind, ok=r.ok, detail=r.detail, layer=r.layer)
                 for i, r in enumerate(results)
             ]
             first_error = FirstErrorFinder(steps).find()
-            if first_error:
-                attribution = first_error.layer.value
         return CaseOutcome(case, all_runs[0], results, passed, first_error, attribution,
                            runs=(all_runs if len(all_runs) > 1 else None))
 

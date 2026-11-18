@@ -1,6 +1,6 @@
 """数据模型。
 
-覆盖单元 / 三层评测 / 用例资产 / 未覆盖原因 6 类 / 快照 / 判定 0/0.5/1。
+覆盖单元 / 三层评测 / 未覆盖原因 6 类 / 快照 / 回放门禁四档。
 """
 from __future__ import annotations
 
@@ -36,14 +36,6 @@ class AttributionLayer(enum.Enum):
     COMPONENT = "component"  # 单个组件的行为（提示词、评估器本身）
 
 
-class Verdict(enum.Enum):
-    """单维度判定：0/1，或人工评判的 0/0.5/1。"""
-
-    PASS = 1.0
-    PARTIAL = 0.5
-    FAIL = 0.0
-
-
 class GateVerdict(enum.Enum):
     """回放门禁四档判定。"""
 
@@ -67,21 +59,6 @@ class CoverageUnit:
 
 
 @dataclass
-class TestCase:
-    """用例资产。"""
-
-    case_id: str
-    unit_id: str
-    query: str
-    expected_behavior: str
-    layer: EvalLayer
-    dims: list[str] = field(default_factory=list)         # 关联的评估维度
-    expected_tools: list[str] = field(default_factory=list)
-    allowed_tools: list[str] = field(default_factory=list)
-    evidence: list[str] = field(default_factory=list)     # 引用字段，禁止无证据预期
-
-
-@dataclass
 class Snapshot:
     """快照。回放的确定性来源。"""
 
@@ -94,32 +71,3 @@ class Snapshot:
     tool_desc_version: str = ""
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     final_output: str = ""
-
-
-@dataclass
-class DimResult:
-    """单维度评估结果。"""
-
-    dim: str
-    verdict: Verdict
-    score: float                 # 1.0 / 0.5 / 0.0
-    triggered: bool = True       # 路由是否触发该维度
-    evidence: list[str] = field(default_factory=list)
-    need_review: bool = False    # 证据不足，转人工
-    weight: float = 0.0
-
-
-@dataclass
-class CaseResult:
-    """一条 Query 的综合评估结果。"""
-
-    trace_id: str
-    dim_results: list[DimResult] = field(default_factory=list)
-    composite: Optional[float] = None        # 路由归一化后的综合分
-    first_error_step: Optional[str] = None   # 链路第一错
-    attribution: Optional[AttributionLayer] = None
-    routed_to_human: bool = False
-    human_score: Optional[float] = None
-
-    def triggered_results(self) -> list[DimResult]:
-        return [d for d in self.dim_results if d.triggered]

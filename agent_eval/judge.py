@@ -26,8 +26,6 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Optional
 
-from evaluator import CalibrationReport, agreement_rate, spearman
-
 JUDGE_SYSTEM_PROMPT = """你是 AI Agent 评测的语义判分器。根据判分标准，判断 Agent 的回答是否合格。
 
 只输出一个 JSON 对象，不要输出其他内容：
@@ -38,6 +36,56 @@ JUDGE_SYSTEM_PROMPT = """你是 AI Agent 评测的语义判分器。根据判分
 - fail: 回答违反至少一条判分标准
 - need_review: 证据不足、无法判断（宁可复核，不硬判）
 - evidence 每条必须引用回答中的具体内容作为依据"""
+
+
+# ---------- 校准统计（金标集驱动） ----------
+
+def spearman(xs: list[float], ys: list[float]) -> float:
+    """秩相关。衡量机器给出的好坏**排序**是否与人工一致（带并列的秩，平均法）。"""
+    n = len(xs)
+    if n != len(ys) or n < 2:
+        raise ValueError("金标集样本数不足或长度不一致")
+    rx = _ranks(xs)
+    ry = _ranks(ys)
+    d2 = sum((a - b) ** 2 for a, b in zip(rx, ry))
+    return 1 - (6 * d2) / (n * (n * n - 1))
+
+
+def _ranks(vals: list[float]) -> list[float]:
+    """带并列的秩（平均法）。人工打分常见 0/0.5/1，并列很多。"""
+    order = sorted(range(len(vals)), key=lambda i: vals[i])
+    ranks = [0.0] * len(vals)
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and vals[order[j + 1]] == vals[order[i]]:
+            j += 1
+        avg = (i + j) / 2 + 1
+        for k in range(i, j + 1):
+            ranks[order[k]] = avg
+        i = j + 1
+    return ranks
+
+
+def agreement_rate(machine: list[float], human: list[float]) -> float:
+    """一致率 = 完全一致样本数 / 总数（粗筛口径）。"""
+    if len(machine) != len(human) or not machine:
+        raise ValueError("样本数不一致或为空")
+    hits = sum(1 for m, h in zip(machine, human) if m == h)
+    return hits / len(machine)
+
+
+@dataclass
+class CalibrationReport:
+    """judge（或任何机器判分器）的上岗校准报告。"""
+
+    dim: str
+    n: int
+    agreement: float
+    spearman: float
+    pass_agreement: bool      # ≥ 0.85（粗筛门槛）
+    pass_spearman: bool       # ≥ 0.80（精评门槛）
+    qualified: bool
 
 
 class JudgeError(Exception):
@@ -156,7 +204,7 @@ def calibrate_judge(machine: list[str], human: list[str],
                     min_samples: int = 200) -> CalibrationReport:
     """judge 上岗校准。machine/human 为 pass/fail 标签序列（人工金标 vs judge 判定）。
 
-    门槛与维度精评一致：一致率 ≥85% 且 Spearman ≥0.8。
+    门槛：一致率 ≥85% 且 Spearman ≥0.8。
     need_review 样本按「不一致」计——judge 说不准本身就是不达标。
     """
     if len(machine) != len(human) or not machine:
@@ -199,5 +247,6 @@ def load_judge_from_env() -> Optional[SemanticJudge]:
 __all__ = [
     "JudgeError", "OpenAICompatClient", "SemanticJudge",
     "calibrate_judge", "load_judge_from_env",
-    "JUDGE_SYSTEM_PROMPT", "Optional",
+    "agreement_rate", "spearman", "CalibrationReport",
+    "JUDGE_SYSTEM_PROMPT",
 ]
