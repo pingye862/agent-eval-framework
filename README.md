@@ -6,11 +6,14 @@
 
 1. **批量执行**：评估集（JSON 用例）逐条驱动被测 Agent，每次调用采集完整轨迹（`AgentRun`：最终输出、工具调用、副作用状态、版本信息）；支持多轮对话用例（`turns`，轮次级断言）
 2. **P1 断言**：必调/禁调工具（含参数存在性）、输出关键词、状态断言、异常检测，失败带中文明细
-3. **第一错归因**：失败用例自动定位链路第一错，归因到 system / trajectory / component 层
-4. **门禁判定**：blocker 用例一票否决（不参与百分比稀释）+ 成功率回落基线超阈值拦截
-5. **pass^k 复跑与 flaky 检测**：同一用例复跑 k 次，全过才算过；部分通过自动单列为 flaky
-6. **快照回放**：轨迹自动落 JSONL 快照，`--compare` 对比新旧报告给出四档判定（可合并/不合并/需排查/环境不稳作废）
-7. **Web 控制台**：评估集增删改查、自定义项目注册（HTTP/Python 适配器）、跑批与报告展示（零依赖，纯标准库 HTTP server）
+3. **P2 语义判分（LLM judge）**：用例声明 `judge_criteria`（自然语言判分标准），校准过的 judge 在 L1/L2 层级自动判语义达标；判分器故障降级「需复核」不硬判，未校准自动跳过并标注
+4. **judge 金标校准**：judge 也是模型，不能裸上岗——对人工金标集先过「一致率 ≥85% 且 Spearman ≥0.8」才准参与门禁
+5. **第一错归因**：失败用例自动定位链路第一错，归因到 system / trajectory / component 层（语义判分失败归 component）
+6. **门禁判定**：blocker 用例一票否决（不参与百分比稀释）+ 成功率回落基线超阈值拦截
+7. **pass^k 复跑与 flaky 检测**：同一用例复跑 k 次，全过才算过；部分通过自动单列为 flaky
+8. **快照回放**：轨迹自动落 JSONL 快照，`--compare` 对比新旧报告给出四档判定（可合并/不合并/需排查/环境不稳作废）
+9. **覆盖账本可视化**：覆盖单元按层拆解、未覆盖 6 类原因分布、高风险豁免审计红线，一键渲染成单文件 HTML 审计报告
+10. **Web 控制台**：评估集增删改查、自定义项目注册（HTTP/Python 适配器）、跑批与报告展示（零依赖，纯标准库 HTTP server）
 
 ## 目录结构
 
@@ -54,6 +57,73 @@ class MyAdapter(AgentAdapter):
   Node runner `require` 仓库真实模块并注入 LLM 服务（依赖注入式入口最容易测）
 
 评估集格式见 `agent_eval/README.md`（blocker / major / minor 分层出题法，金标集人工确认）。
+
+## P2 语义判分：让 judge 先校准再上岗
+
+P1 断言只能挡「确定性错误」。语义层的问题——回答对不对、有没有答非所问、
+兜底有没有兜住——交给 LLM judge，但 judge 本身也是模型，必须先校准：
+
+```python
+from agent_eval_lib import (BatchRunner, load_evalset,
+                            SemanticJudge, OpenAICompatClient, calibrate_judge)
+
+judge = SemanticJudge(client=OpenAICompatClient(
+    "https://api.deepseek.com/v1/chat/completions", key, "deepseek-chat"))
+
+# 1) 金标校准：200+ 条人工标注，一致率 ≥85% 且 Spearman ≥0.8 才放行
+report = calibrate_judge(machine_labels, human_labels)   # pass/fail 标签序列
+if report.qualified:
+    judge.mark_calibrated(report)
+
+# 2) 接入跑批：L1/L2 层级自动判语义；未校准自动跳过并标注，绝不硬判
+runner = BatchRunner(adapter, judge=judge, judge_level=("L1", "L2"))
+eval_report = runner.run_all(cases, level="L1")
+print(eval_report.semantic_stats())     # 实判 / 失败 / 转人工 / 跳过
+```
+
+评估集里声明判分标准（自然语言，一条或多条）：
+
+```json
+{
+  "id": "CS-006",
+  "query": "这款手机的电池容量多大",
+  "severity": "blocker",
+  "route": "unanswerable",
+  "judge_criteria": [
+    "回答必须明确表示无法回答（缺少机型信息），而不是瞎猜一个型号",
+    "回答应引导用户补充机型，或提供转人工的路径"
+  ]
+}
+```
+
+判定规则：`pass` 计过；`fail` 语义断言失败（归因 component 层，blocker 照样一票否决）；
+`need_review` / 调用失败 → 自动转人工队列，不硬判污染结果。
+
+## 覆盖账本可视化
+
+覆盖率不是报个百分数就完事。覆盖账本回答三个审计问题：按层拆（system /
+trajectory / component）哪层欠账、未覆盖的 6 类原因分布（「风险豁免」有没有被
+滥用）、高风险且未覆盖的单元是哪几个（审计红线，一个都不能有）。
+
+```bash
+# demo 示例：跑批 + 生成 coverage.html（双击即看，单文件无外部依赖）
+cd agent_eval/examples/demo_project
+python3 run_eval.py --fixed --coverage
+
+# 自己的账本：写一个覆盖规格 JSON，一行命令出审计报告
+python3 agent_eval/report.py --spec coverage_spec.json --out coverage.html --text
+```
+
+规格格式（未覆盖单元必须标 6 类原因之一，否则审计不过）：
+
+```json
+[
+  {"unit_id": "U001", "description": "价格查询", "business_line": "售前",
+   "layer": "trajectory", "covered_by": ["CS-001"], "risk_level": "high"},
+  {"unit_id": "U005", "description": "多轮上下文", "business_line": "售前",
+   "layer": "component", "covered_by": [], "not_covered_reason": "待澄清"}
+]
+```
 
 ## 环境变量
 

@@ -61,6 +61,10 @@
     "persona": "模糊提问，无机型上下文",
     "must_not_call": [{"tool": "query_price"}],
     "response_contains": ["人工"],
+    "judge_criteria": [
+      "回答必须明确表示无法回答该问题（因为缺少机型信息），而不是瞎猜一个型号",
+      "回答应引导用户补充机型，或提供转人工的路径"
+    ],
     "owner": "AP"
   },
   {
@@ -69,6 +73,7 @@
     "severity": "minor",
     "route": "product_consult",
     "must_call": [{"tool": "query_product"}],
+    "judge_criteria": ["回答中的芯片型号必须与知识库事实一致，不能编造"],
     "owner": "AP"
   },
   {

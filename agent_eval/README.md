@@ -60,7 +60,8 @@ class MyAgentAdapter(AgentAdapter):
 **第 2 步：准备评估集**（JSON，参考 `evalset.json`）
 
 关键字段：`severity`（blocker 一票否决）、`must_call` / `must_not_call`（轨迹断言）、
-`response_contains`（结果断言）、`state_after`（副作用断言）、`context_overrides`（用例级前置状态）。
+`response_contains`（结果断言）、`state_after`（副作用断言）、`context_overrides`（用例级前置状态）、
+`judge_criteria`（P2 语义判分标准，数组，LLM judge 校准通过后自动执行，详见根目录 README）。
 
 **第 3 步：命令行跑批**
 
@@ -81,7 +82,9 @@ python3 run_eval.py --gate --baseline 0.95   # 门禁模式：比基线掉 2pp �
 | 代码 | 作用 |
 |---|---|
 | `agent_eval_lib.py` | 门面，外部项目只 import 它 |
-| `harness.py` | 执行器：AgentAdapter 协议 + P1 断言 + 跑批 + 门禁判定 |
+| `harness.py` | 执行器：AgentAdapter 协议 + P1 断言 + P2 语义判分接入 + 跑批 + 门禁判定 |
+| `judge.py` | P2 语义判分：LLM judge + 金标校准（一致率 ≥85% 且 Spearman ≥0.8 才上岗） |
+| `report.py` | 覆盖账本可视化：单文件 HTML 审计报告（按层拆解 / 6 类原因 / 高风险红线） |
 | `evalset.py` | 评估集加载（缺必填字段直接报错，半成品进不了门禁） |
 | `models.py` / `attribution.py` / `evaluator.py` / `replay.py` / `coverage.py` / `runner.py` | 方法论内核（见下表） |
 

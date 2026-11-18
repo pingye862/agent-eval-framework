@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="zh"><head><meta charset="utf-8">
+<title>覆盖账本审计报告</title>
+<style>
+body{font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;
+     margin:0;background:#f8fafc;color:#1e293b}
+.wrap{max-width:920px;margin:0 auto;padding:32px 24px}
+h1{font-size:22px;margin:0 0 4px} .sub{color:#64748b;font-size:13px;margin-bottom:20px}
+.cards{display:flex;gap:12px;margin-bottom:16px}
+.card{flex:1;background:#fff;border:1px solid #e2e8f0;border-radius:10px;
+      padding:14px 16px;text-align:center}
+.card .v{font-size:26px;font-weight:700} .card .k{font-size:12px;color:#64748b}
+.banner{border-radius:10px;padding:12px 16px;margin-bottom:16px;font-size:14px}
+.banner.ok{background:#dcfce7;color:#14532d} .banner.bad{background:#fee2e2;color:#7f1d1d}
+section{background:#fff;border:1px solid #e2e8f0;border-radius:10px;
+        padding:16px 18px;margin-bottom:16px}
+section h2{font-size:15px;margin:0 0 12px}
+.row{display:flex;align-items:center;gap:10px;margin:7px 0}
+.lbl{width:110px;flex:none;font-size:13px;text-align:right;color:#1e293b}
+.track{flex:1;height:14px;background:#f1f5f9;border-radius:7px;overflow:hidden;
+       display:flex}
+.fill{height:100%} .fill.gap{}
+.num{width:90px;flex:none;font-size:12px;color:#64748b}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{padding:7px 9px;border-bottom:1px solid #e2e8f0;text-align:left;
+      vertical-align:top}
+th{color:#64748b;font-weight:600;font-size:12px}
+.dim{color:#64748b}
+.pill{padding:2px 9px;border-radius:99px;font-size:12px;white-space:nowrap}
+.pill.ok{background:#dcfce7;color:#166534} .pill.bad{background:#fee2e2;color:#991b1b}
+ul{margin:0;padding-left:20px;font-size:13px}
+</style></head><body><div class="wrap">
+<h1>覆盖账本审计报告</h1>
+<div class="sub">生成时间 2026-11-18 13:54 ｜ agent-eval-framework</div>
+<div class="banner ok">✅ 审计通过：高风险单元零豁免</div>
+<div class="cards">
+<div class="card"><div class="v">7</div><div class="k">覆盖单元总数</div></div>
+<div class="card"><div class="v" style="color:#16a34a">4</div><div class="k">已覆盖</div></div>
+<div class="card"><div class="v" style="color:#dc2626">3</div><div class="k">未覆盖</div></div>
+<div class="card"><div class="v" style="color:#2563eb">57.1%</div><div class="k">覆盖率</div></div>
+</div>
+<section><h2>按层拆解（system / trajectory / component）</h2><div class="row"><span class="lbl">component</span><div class="track"><div class="fill" style="width:0.0%;background:#0891b2"></div><div class="fill gap" style="width:100.0%;background:#fecaca"></div></div><span class="num">0/2</span></div><div class="row"><span class="lbl">system</span><div class="track"><div class="fill" style="width:66.7%;background:#2563eb"></div><div class="fill gap" style="width:33.3%;background:#fecaca"></div></div><span class="num">2/3</span></div><div class="row"><span class="lbl">trajectory</span><div class="track"><div class="fill" style="width:100.0%;background:#7c3aed"></div><div class="fill gap" style="width:0.0%;background:#fecaca"></div></div><span class="num">2/2</span></div></section>
+<section><h2>未覆盖原因分布（6 类，只标注不删除）</h2><div class="row"><span class="lbl">待澄清</span><div class="track"><div class="fill" style="width:33.3%;background:#dc2626"></div></div><span class="num">1 条 · 33.3%</span></div><div class="row"><span class="lbl">范围排除</span><div class="track"><div class="fill" style="width:33.3%;background:#d97706"></div></div><span class="num">1 条 · 33.3%</span></div><div class="row"><span class="lbl">待补数据</span><div class="track"><div class="fill" style="width:33.3%;background:#2563eb"></div></div><span class="num">1 条 · 33.3%</span></div></section>
+<section><h2>高风险且未覆盖（审计红线）</h2><ul><li>无</li></ul></section>
+<section><h2>覆盖单元明细</h2>
+<table><tr><th>单元ID</th><th>描述</th><th>业务线</th><th>层</th><th>状态</th><th>覆盖用例 / 说明</th></tr>
+<tr><td>U001</td><td>价格查询：按机型返回正确价格</td><td>售前</td><td>trajectory</td><td><span class="pill ok">已覆盖</span></td><td class='dim'>CS-001、CS-002、CS-008</td></tr><tr><td>U002</td><td>商品参数查询：屏幕/芯片等字段</td><td>售前</td><td>trajectory</td><td><span class="pill ok">已覆盖</span></td><td class='dim'>CS-003、CS-004、CS-007</td></tr><tr><td>U003</td><td>VIP 优惠通知副作用（notify 落日志）</td><td>售前</td><td>system</td><td><span class="pill ok">已覆盖</span></td><td class='dim'>CS-005</td></tr><tr><td>U004</td><td>模糊提问兜底：缺机型不瞎猜，引导补充</td><td>售前</td><td>system</td><td><span class="pill ok">已覆盖</span></td><td class='dim'>CS-006</td></tr><tr><td>U005</td><td>多轮对话上下文（澄清后补参）</td><td>售前</td><td>component</td><td><span class="pill bad">待澄清</span></td><td class='dim'>多轮对话上下文（澄清后补参）</td></tr><tr><td>U006</td><td>实时库存查询</td><td>售前</td><td>system</td><td><span class="pill bad">范围排除</span></td><td class='dim'>实时库存查询</td></tr><tr><td>U007</td><td>跨机型比价推荐</td><td>售前</td><td>component</td><td><span class="pill bad">待补数据</span></td><td class='dim'>跨机型比价推荐</td></tr>
+</table></section>
+</div></body></html>

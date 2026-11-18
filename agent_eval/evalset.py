@@ -36,6 +36,11 @@ def _validate_item(path: str | Path, i: int, item: dict) -> None:
     for j, kw in enumerate(item.get("response_contains") or []):
         if not isinstance(kw, str) or not kw.strip():
             raise ValueError(f"{path} 第 {i} 条 response_contains[{j}] 应为非空字符串")
+    for j, c in enumerate(item.get("judge_criteria") or []):
+        if not isinstance(c, str) or not c.strip():
+            raise ValueError(
+                f"{path} 第 {i} 条 judge_criteria[{j}] 应为非空字符串"
+                "（语义判分标准，judge 校准通过后自动执行）")
     turns = item.get("turns")
     if turns is not None:
         if not isinstance(turns, list) or not turns:

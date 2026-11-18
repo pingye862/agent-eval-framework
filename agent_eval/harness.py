@@ -20,6 +20,15 @@ from evalset import EvalCase
 from models import AttributionLayer
 
 
+def _import_judge():
+    """延迟导入 judge（可选模块：无 LLM 时框架照常跑 P1）。"""
+    try:
+        import judge as _j
+        return _j
+    except ImportError:
+        return None
+
+
 # ---------- 你的 Agent 要返回的东西 ----------
 
 @dataclass
@@ -67,10 +76,11 @@ class AgentAdapter(ABC):
 
 @dataclass
 class AssertionResult:
-    kind: str            # must_call / must_not_call / response_contains / state_after / no_error
+    kind: str            # must_call / must_not_call / response_contains / state_after / no_error / semantic
     ok: bool
     detail: str
     layer: AttributionLayer = AttributionLayer.TRAJECTORY
+    skipped: bool = False   # True = 未参与判定（如 judge 未校准被跳过），不影响 passed
 
 
 def assert_case(case: EvalCase, runs: AgentRun | list[AgentRun]) -> list[AssertionResult]:
@@ -225,6 +235,25 @@ class EvalReport:
     def flaky_cases(self) -> list[CaseOutcome]:
         return [o for o in self.outcomes if o.flaky]
 
+    def semantic_stats(self) -> dict:
+        """P2 语义判分汇总: judged(实判) / failed / skipped(跳过) / need_review(转人工)。"""
+        stats = {"judged": 0, "failed": 0, "skipped": 0, "need_review": 0}
+        for o in self.outcomes:
+            for a in o.assertions:
+                if a.kind != "semantic":
+                    continue
+                if a.skipped:
+                    stats["skipped"] += 1
+                elif not a.ok:
+                    stats["failed"] += 1
+                    stats["judged"] += 1
+                elif "证据不足转人工" in a.detail:
+                    stats["need_review"] += 1
+                    stats["judged"] += 1
+                else:
+                    stats["judged"] += 1
+        return stats
+
     def versions_summary(self) -> dict:
         """版本四要素汇总（取最后一次记录到的值），供报告留档与版本对比。"""
         summary: dict = {}
@@ -243,6 +272,10 @@ class EvalReport:
         if flaky:
             lines.append(f"⚠ 非确定性用例 {len(flaky)} 条: "
                          f"{[o.case.case_id for o in flaky]}")
+        sem = self.semantic_stats()
+        if any(o.case.judge_criteria for o in self.outcomes):
+            lines.append(f"P2 语义判分: 实判 {sem['judged']} / 失败 {sem['failed']} / "
+                         f"转人工 {sem['need_review']} / 跳过 {sem['skipped']}")
         bad = [o for o in self.outcomes if not o.passed]
         if bad:
             lines.append("-" * 62)
@@ -263,10 +296,16 @@ class BatchRunner:
     max_workers > 1 时用线程池并发执行（适用于 HTTP 型 adapter，进程内 adapter 注意线程安全）。
     """
 
-    def __init__(self, adapter: AgentAdapter) -> None:
+    def __init__(self, adapter: AgentAdapter,
+                 judge: Optional[object] = None,
+                 judge_level: tuple = ("L1", "L2")) -> None:
+        """judge: SemanticJudge 实例（可选）。judge_level: 哪些评测层级启用语义判分。"""
         self.adapter = adapter
+        self.judge = judge
+        self.judge_level = set(judge_level)
 
-    def run_case(self, case: EvalCase, context: dict | None = None) -> CaseOutcome:
+    def run_case(self, case: EvalCase, context: dict | None = None,
+                 level: str = "L0") -> CaseOutcome:
         merged = {**(context or {}), **case.context_overrides}
         all_runs: list[AgentRun]
         if case.turns:
@@ -276,7 +315,8 @@ class BatchRunner:
         else:
             all_runs = [self.adapter.run(case.query, merged)]
         results = assert_case(case, all_runs)
-        passed = all(r.ok for r in results)
+        results += self._semantic_assertions(case, all_runs, level)
+        passed = all(r.ok for r in results if not r.skipped)
 
         first_error, attribution = None, None
         if not passed:
@@ -291,10 +331,42 @@ class BatchRunner:
         return CaseOutcome(case, all_runs[0], results, passed, first_error, attribution,
                            runs=(all_runs if len(all_runs) > 1 else None))
 
+    def _semantic_assertions(self, case: EvalCase,
+                             runs: list[AgentRun], level: str) -> list[AssertionResult]:
+        """P2 语义断言。规则：
+
+        - 只在 judge_level 层级生效，且用例声明了 judge_criteria
+        - judge 未配置 / 未校准 → 产出 skipped=True 的占位断言（审计可见，不参与判定）
+        - 校准过的 judge 判 fail → 语义断言失败，归因到 component 层（判分对象是
+          提示词与回答行为）；need_review 同样标记但不硬判，转人工队列
+        """
+        if not case.judge_criteria:
+            return []
+        if level not in self.judge_level or self.judge is None or not self.judge.calibrated:
+            why = (f"层级 {level} 不启用语义判分" if level not in self.judge_level
+                   else ("未配置 judge" if self.judge is None else "judge 未通过金标校准，不能上岗"))
+            return [AssertionResult("semantic", True,
+                                    f"P2 语义断言跳过（{why}）: "
+                                    f"{len(case.judge_criteria)} 条标准未判",
+                                    AttributionLayer.COMPONENT, skipped=True)]
+        final_output = runs[-1].final_output
+        r = self.judge.judge(case.query, case.judge_criteria, final_output)
+        verdict = r.get("verdict", "need_review")
+        evidence = r.get("evidence", [])
+        if verdict == "pass":
+            return [AssertionResult("semantic", True, "", AttributionLayer.COMPONENT)]
+        if verdict == "need_review":
+            return [AssertionResult("semantic", True,
+                                    f"judge 证据不足转人工: {'; '.join(evidence[:3])}",
+                                    AttributionLayer.COMPONENT, skipped=True)]
+        return [AssertionResult("semantic", False,
+                                f"语义判分不达标: {'; '.join(evidence[:3])}",
+                                AttributionLayer.COMPONENT)]
+
     def _run_repeats(self, case: EvalCase, repeat: int,
-                     context: dict | None) -> CaseOutcome:
+                     context: dict | None, level: str = "L0") -> CaseOutcome:
         """复跑聚合：pass^k 口径（全过才算过），断言明细取第一次运行。"""
-        outcomes = [self.run_case(case, context) for _ in range(repeat)]
+        outcomes = [self.run_case(case, context, level=level) for _ in range(repeat)]
         pass_runs = sum(1 for o in outcomes if o.passed)
         base = outcomes[0]
         return CaseOutcome(
@@ -310,11 +382,11 @@ class BatchRunner:
         if repeat < 1 or max_workers < 1:
             raise ValueError("repeat 与 max_workers 必须 ≥ 1")
         if repeat == 1 and max_workers == 1:
-            outcomes = [self.run_case(c, context) for c in cases]
+            outcomes = [self.run_case(c, context, level=level) for c in cases]
         else:
             from concurrent.futures import ThreadPoolExecutor
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                futures = [(i, pool.submit(self._run_repeats, c, repeat, context))
+                futures = [(i, pool.submit(self._run_repeats, c, repeat, context, level))
                            for i, c in enumerate(cases)]
                 outcomes: list[Optional[CaseOutcome]] = [None] * len(cases)
                 for i, fut in futures:
@@ -326,7 +398,10 @@ class BatchRunner:
 
 def gate_decision(report: EvalReport, baseline_rate: Optional[float] = None,
                   drop_pp: float = 2.0) -> tuple[bool, list[str]]:
-    """返回 (是否放行, 触发的规则列表)。blocker 一票否决，不参与百分比稀释。"""
+    """返回 (是否放行, 触发的规则列表)。blocker 一票否决，不参与百分比稀释。
+
+    P2 语义断言失败的 blocker 用例同样一票否决（语义失败已在 passed 里，无需特判）。
+    """
     reasons: list[str] = []
     blocked = report.blockers_failed()
     if blocked:
