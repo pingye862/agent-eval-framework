@@ -1,0 +1,16 @@
+[
+  {"unit_id": "U001", "description": "价格查询：按机型返回正确价格", "business_line": "售前",
+   "layer": "trajectory", "covered_by": ["CS-001", "CS-002", "CS-008"], "risk_level": "high"},
+  {"unit_id": "U002", "description": "商品参数查询：屏幕/芯片等字段", "business_line": "售前",
+   "layer": "trajectory", "covered_by": ["CS-003", "CS-004", "CS-007"], "risk_level": "normal"},
+  {"unit_id": "U003", "description": "VIP 优惠通知副作用（notify 落日志）", "business_line": "售前",
+   "layer": "system", "covered_by": ["CS-005"], "risk_level": "high"},
+  {"unit_id": "U004", "description": "模糊提问兜底：缺机型不瞎猜，引导补充", "business_line": "售前",
+   "layer": "system", "covered_by": ["CS-006"], "risk_level": "high"},
+  {"unit_id": "U005", "description": "多轮对话上下文（澄清后补参）", "business_line": "售前",
+   "layer": "component", "covered_by": [], "not_covered_reason": "待澄清", "risk_level": "normal"},
+  {"unit_id": "U006", "description": "实时库存查询", "business_line": "售前",
+   "layer": "system", "covered_by": [], "not_covered_reason": "范围排除"},
+  {"unit_id": "U007", "description": "跨机型比价推荐", "business_line": "售前",
+   "layer": "component", "covered_by": [], "not_covered_reason": "待补数据", "risk_level": "normal"}
+]

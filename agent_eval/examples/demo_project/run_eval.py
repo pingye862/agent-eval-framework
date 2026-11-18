@@ -29,6 +29,8 @@ def main() -> int:
                     help="历史基线成功率（0~1），用于下降判定")
     ap.add_argument("--level", default="L0", choices=["L0", "L1", "L2"],
                     help="评测层级：L0 只 P1；L1/L2 加 P2 语义判分（需 EVAL_MODEL_*）")
+    ap.add_argument("--force-uncalibrated", action="store_true",
+                    help="仅本地演示：未做金标校准也放行 judge。生产环境禁止使用")
     ap.add_argument("--coverage", action="store_true",
                     help="生成覆盖账本审计报告 coverage.html")
     args = ap.parse_args()
@@ -43,9 +45,13 @@ def main() -> int:
         if judge is None:
             print("⚠ 未配置 EVAL_MODEL_URL/NAME/KEY，P2 语义判分将跳过（P1 照常跑）")
         elif not judge.calibrated:
-            print("⚠ judge 未通过金标校准（calibrate_judge 一致率 ≥85% 且 Spearman ≥0.8），"
-                  "语义断言将跳过并标注。这里为演示先放行校准标记——生产环境请先跑金标集校准")
-            judge.mark_calibrated()
+            if args.force_uncalibrated:
+                print("⚠ 仅为本地演示放行未校准 judge——生产环境必须先跑金标集校准"
+                      "（calibrate_judge：一致率 ≥85% 且 Spearman ≥0.8）")
+                judge.mark_calibrated()
+            else:
+                print("⚠ judge 未通过金标校准，P2 语义判分跳过并标注。"
+                      "想看判分效果可加 --force-uncalibrated（仅限本地演示）")
 
     cases = load_evalset(args.evalset)
     adapter_cls = __import__("adapter").ShoppingAgentAdapter

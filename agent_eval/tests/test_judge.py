@@ -169,7 +169,8 @@ def test_no_judge_criteria_no_semantic_assertion():
 def test_run_all_level_flows_to_semantic_and_report_stats():
     ok_reply = json.dumps({"verdict": "pass", "evidence": []}, ensure_ascii=False)
     bad_reply = json.dumps({"verdict": "fail", "evidence": ["不达标"]}, ensure_ascii=False)
-    j = SemanticJudge(client=FakeClient(), calibrated=True)
+    j = SemanticJudge(client=FakeClient(), calibrated=True,
+                      cache_judgments=False)   # 两次用例内容相同，关缓存避免串判定
     runner = BatchRunner(StubAdapter(), judge=j)
     cases = [_case(id="c1"), _case(id="c2")]
     # 用两轮调用分别模拟 pass/fail
@@ -211,3 +212,127 @@ def test_load_judge_from_env_full(monkeypatch):
 def test_openai_client_direct_opener():
     c = OpenAICompatClient("https://api.example.com/v1/chat/completions", "k", "m")
     assert c.base_url.endswith("chat/completions")
+
+
+# ---------- judge 缓存与重试 ----------
+
+def test_judge_cache_hits_on_identical_input():
+    c = FakeClient(reply='{"verdict": "pass", "evidence": []}')
+    j = SemanticJudge(client=c)
+    a = j.judge("q", ["标准"], "回答")
+    b = j.judge("q", ["标准"], "回答")
+    assert a == b and len(c.calls) == 1       # pass^k 复跑不重复烧 token
+
+
+def test_judge_cache_does_not_hide_different_output():
+    c = FakeClient(reply='{"verdict": "pass", "evidence": []}')
+    j = SemanticJudge(client=c)
+    j.judge("q", ["标准"], "回答A")
+    j.judge("q", ["标准"], "回答B")
+    assert len(c.calls) == 2
+
+
+def test_judge_need_review_not_cached():
+    bad = FakeClient(reply='{"verdict": "need_review", "evidence": ["证据不足"]}')
+    j = SemanticJudge(client=bad)
+    j.judge("q", ["标准"], "回答")
+    bad.reply = '{"verdict": "pass", "evidence": []}'
+    assert j.judge("q", ["标准"], "回答")["verdict"] == "pass"
+    assert len(bad.calls) == 2                  # 网络/证据恢复后允许重判
+
+
+class _FakeResp:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self):
+        return json.dumps({"choices": [{"message": {
+            "content": '{"verdict": "pass", "evidence": []}'}}]}).encode("utf-8")
+
+
+def _patched_opener(monkeypatch, fail_times):
+    """让 opener.open 前 fail_times 次抛超时，之后返回正常响应。"""
+    import judge as jmod
+    state = {"n": 0}
+
+    class Opener:
+        def open(self, req, timeout=None):
+            state["n"] += 1
+            if state["n"] <= fail_times:
+                raise OSError("瞬时超时")
+            return _FakeResp()
+
+    monkeypatch.setattr(jmod.urllib.request, "build_opener", lambda *a: Opener())
+    return state
+
+
+def test_judge_retry_then_succeeds(monkeypatch):
+    state = _patched_opener(monkeypatch, fail_times=2)
+    c = OpenAICompatClient("https://x/v1/chat/completions", "k", "m", retries=2)
+    j = SemanticJudge(client=c)
+    assert j.judge("q", ["标准"], "回答")["verdict"] == "pass"
+    assert state["n"] == 3
+
+
+def test_judge_all_retries_fail_degrades(monkeypatch):
+    state = _patched_opener(monkeypatch, fail_times=99)
+    c = OpenAICompatClient("https://x/v1/chat/completions", "k", "m", retries=1)
+    j = SemanticJudge(client=c)
+    r = j.judge("q", ["标准"], "回答")
+    assert r["verdict"] == "need_review" and "重试" in r["evidence"][0]
+    assert state["n"] == 2
+
+
+# ---------- 断言显式状态 ----------
+
+def test_result_status_is_explicit_not_parsed_from_detail():
+    from harness import AssertionResult
+    assert AssertionResult("x", True, "").result_status() == "passed"
+    assert AssertionResult("x", False, "失败").result_status() == "failed"
+    assert AssertionResult("x", True, "跳过", skipped=True).result_status() == "skipped"
+    assert AssertionResult("x", True, "随便什么文案", skipped=True,
+                           status="need_review").result_status() == "need_review"
+
+
+def test_semantic_stats_and_review_cases_use_status():
+    reply = json.dumps({"verdict": "need_review", "evidence": ["证据不足"]},
+                       ensure_ascii=False)
+    j = SemanticJudge(client=FakeClient(reply=reply), calibrated=True)
+    runner = BatchRunner(StubAdapter(), judge=j)
+    r = runner.run_all([_case()], level="L1")
+    assert r.semantic_stats()["need_review"] == 1
+    assert len(r.review_cases()) == 1
+    assert "待复核" in r.text()
+
+
+def test_repeat_keeps_multi_turn_trajectories():
+    from harness import write_snapshots
+    import tempfile
+    j = SemanticJudge(client=FakeClient(reply='{"verdict": "pass", "evidence": []}'),
+                      calibrated=True)
+    runner = BatchRunner(StubAdapter(), judge=j)
+    c = EvalCase(case_id="m1", query="q1", severity="major",
+                 turns=[{"query": "q2", "response_contains": ["好的"]}])
+    r = runner.run_all([c], level="L1", repeat=3)
+    assert r.outcomes[0].runs is not None and len(r.outcomes[0].runs) == 2
+    with tempfile.TemporaryDirectory() as d:
+        n = write_snapshots(f"{d}/s.jsonl", r)
+        assert n == 2, f"复跑后快照应保留 2 轮，实际 {n}"
+
+
+def test_snapshot_records_semantic_evidence():
+    from harness import write_snapshots
+    import tempfile
+    reply = json.dumps({"verdict": "fail", "evidence": ["没给数量"]}, ensure_ascii=False)
+    j = SemanticJudge(client=FakeClient(reply=reply), calibrated=True)
+    runner = BatchRunner(StubAdapter(), judge=j)
+    r = runner.run_all([_case()], level="L1")
+    with tempfile.TemporaryDirectory() as d:
+        p = f"{d}/s.jsonl"
+        write_snapshots(p, r)
+        rec = json.loads(open(p, encoding="utf-8").readline())
+        assert rec["semantic"][0]["status"] == "failed"
+        assert "语义判分不达标" in rec["semantic"][0]["detail"]

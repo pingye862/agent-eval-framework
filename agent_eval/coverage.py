@@ -39,6 +39,10 @@ class CoverageLedger:
             raise ValueError(f"单元 {unit_id} 已有覆盖用例，不能标未覆盖")
         unit.not_covered_reason = reason
 
+    def units(self) -> list[CoverageUnit]:
+        """只读快照，供报告渲染（避免外部直接摸 _units 私有属性）。"""
+        return list(self._units.values())
+
     def report(self) -> CoverageReport:
         by_reason: dict[str, int] = defaultdict(int)
         by_layer: dict[str, dict[str, int]] = defaultdict(lambda: {"covered": 0, "not": 0})

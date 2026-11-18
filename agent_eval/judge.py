@@ -48,12 +48,14 @@ class OpenAICompatClient:
     """OpenAI 兼容 chat completions 客户端（纯标准库，直连不走系统代理）。"""
 
     def __init__(self, base_url: str, api_key: str, model: str,
-                 timeout: int = 60, temperature: float = 0.0) -> None:
+                 timeout: int = 60, temperature: float = 0.0,
+                 retries: int = 2) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
         self.temperature = temperature
+        self.retries = retries     # 一次网络抖动不该让整批语义断言全部跳过、门禁误放行
 
     def chat(self, system: str, user: str) -> str:
         body = json.dumps({
@@ -70,11 +72,16 @@ class OpenAICompatClient:
                      "Authorization": f"Bearer {self.api_key}"})
         # 直连 opener：评测机常见系统代理只放行白名单域，绕开防 502
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        try:
-            with opener.open(req, timeout=self.timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-        except Exception as e:  # 网络 / HTTP 错误统一降级，不让判分器崩掉跑批
-            raise JudgeError(f"LLM 调用失败: {e}") from e
+        last: Exception | None = None
+        for attempt in range(self.retries + 1):
+            try:
+                with opener.open(req, timeout=self.timeout) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                break
+            except Exception as e:  # 网络 / HTTP 错误按次数重试，最终失败再降级
+                last = e
+        else:
+            raise JudgeError(f"LLM 调用失败（重试 {self.retries} 次）: {last}") from last
         try:
             return data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as e:
@@ -85,7 +92,9 @@ def _parse_verdict(text: str) -> dict:
     """从模型输出里抠 JSON（容忍代码围栏和前后杂文）。抠不出 → need_review。"""
     text = (text or "").strip()
     if text.startswith("```"):
-        text = text.strip("`").lstrip("json").strip()
+        text = text[3:].strip()
+        if text.lower().startswith("json"):
+            text = text[4:].strip()
     start, end = text.find("{"), text.rfind("}")
     if start < 0 or end <= start:
         return {"verdict": "need_review", "evidence": [f"模型输出无法解析: {text[:120]!r}"]}
@@ -111,12 +120,17 @@ class SemanticJudge:
     calibrated: bool = False
     calibration: Optional[CalibrationReport] = None
     last_errors: list[str] = field(default_factory=list)   # 调试留档：最近几次调用失败原因
+    cache_judgments: bool = True   # 相同 (query, criteria, output) 只判一次，pass^k 复跑不重复烧 token
+    _cache: dict = field(default_factory=dict, repr=False)
 
     def judge(self, query: str, criteria: list[str], output: str) -> dict:
         """判一条输出。返回 {"verdict": pass/fail/need_review, "evidence": [...]}。
 
         任何调用失败都降级为 need_review —— 判分器故障不能污染跑批结果。
         """
+        key = (query, tuple(criteria), output)
+        if self.cache_judgments and key in self._cache:
+            return self._cache[key]
         user = (f"【判分标准】\n" + "\n".join(f"- {c}" for c in criteria)
                 + f"\n\n【用户问题】\n{query}"
                 + f"\n\n【Agent 回答】\n{output or '（空输出）'}")
@@ -126,7 +140,10 @@ class SemanticJudge:
         except JudgeError as e:
             self.last_errors.append(str(e))
             self.last_errors = self.last_errors[-10:]
-            return {"verdict": "need_review", "evidence": [f"judge 调用降级: {e}"]}
+            result = {"verdict": "need_review", "evidence": [f"judge 调用降级: {e}"]}
+        if self.cache_judgments and result["verdict"] != "need_review":
+            # 不缓存 need_review：网络恢复 / 证据补齐后允许重新判
+            self._cache[key] = result
         return result
 
     def mark_calibrated(self, report: Optional[CalibrationReport] = None) -> None:

@@ -109,7 +109,7 @@ class EvalPipeline:
         """缺陷样本回流：
 
         failed: 精评或人工判失败的样本
-        返回一条补录用例的建议，交给方法一的资产生成阶段。
+        返回一条补录用例的建议，交给用例资产生成阶段。
         """
         return {
             "source_trace": failed.trace_id,

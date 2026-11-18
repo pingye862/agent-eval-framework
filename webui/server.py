@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import re
 import sys
 import time
@@ -37,6 +38,8 @@ sys.path.insert(1, str(DEMO_DIR))
 from evalset import load_evalset                      # noqa: E402
 from harness import (BatchRunner, gate_decision, write_snapshots,   # noqa: E402
                      AgentAdapter, AgentRun, ToolCallRecord)
+from judge import load_judge_from_env                # noqa: E402
+from report import build_ledger, render_coverage_html  # noqa: E402
 
 
 def _load_module(name: str, path: Path):
@@ -161,6 +164,12 @@ def _validate_case(case: dict, others: list[dict],
     v = case.get("response_contains")
     if isinstance(v, str):
         case["response_contains"] = [s.strip() for s in v.split(",") if s.strip()]
+    v = case.get("judge_criteria")
+    if isinstance(v, str):
+        # 前端每行一条；API 直接调用也允许传字符串
+        case["judge_criteria"] = [s.strip() for s in v.splitlines() if s.strip()]
+    elif isinstance(v, list):
+        case["judge_criteria"] = [str(x).strip() for x in v if str(x).strip()]
     for k in ("must_call", "must_not_call"):
         v = case.get(k)
         if isinstance(v, str):
@@ -195,10 +204,14 @@ def save_evalset_cases(path: Path, cases: list[dict]) -> None:
     if not cases and path.exists() and _read_cases(path):
         raise ValueError("评估集至少要保留 1 条用例（删除后不能为空）")
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(cases, ensure_ascii=False, indent=2), encoding="utf-8")
-    if cases:
-        load_evalset(str(tmp))
-    tmp.replace(path)
+    try:
+        tmp.write_text(json.dumps(cases, ensure_ascii=False, indent=2), encoding="utf-8")
+        if cases:
+            load_evalset(str(tmp))      # 整集校验不过就别落盘，也别留半成品
+        tmp.replace(path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()                # 校验失败时清掉临时文件，不留垃圾
 
 
 class GenericHttpAdapter(AgentAdapter):
@@ -220,6 +233,7 @@ class GenericHttpAdapter(AgentAdapter):
 
     def __init__(self, cfg: dict) -> None:
         self.url = cfg["url"]
+        self.method = str(cfg.get("method") or "POST").upper()
         self.headers = dict(cfg.get("headers") or {})
         self.headers.setdefault("Content-Type", "application/json")
         self.body_template = dict(cfg.get("body_template") or {"query": "{query}"})
@@ -255,7 +269,7 @@ class GenericHttpAdapter(AgentAdapter):
             body[self.context_field] = context
         try:
             req = urllib.request.Request(self.url, data=json.dumps(body).encode("utf-8"),
-                                         headers=self.headers, method="POST")
+                                         headers=self.headers, method=self.method)
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 out = json.loads(resp.read().decode("utf-8"))
         except Exception as e:                            # noqa: BLE001
@@ -366,7 +380,9 @@ def serialize_report(report, gate_ok, gate_reasons, baseline) -> dict:
             "total_runs": o.total_runs,
             "flaky": o.flaky,
             "assertions": [
-                {"kind": a.kind, "ok": a.ok, "detail": a.detail, "layer": a.layer.value}
+                {"kind": a.kind, "ok": a.ok, "detail": a.detail,
+                 "layer": a.layer.value, "skipped": a.skipped,
+                 "status": a.result_status()}
                 for a in o.assertions
             ],
             "first_error": {
@@ -395,6 +411,7 @@ def serialize_report(report, gate_ok, gate_reasons, baseline) -> dict:
         "baseline": baseline,
         "versions": versions,
         "text_report": report.text(),
+        "semantic_stats": report.semantic_stats(),
         "cases": cases,
     }
 
@@ -418,6 +435,13 @@ class Handler(BaseHTTPRequestHandler):
             html = (WEBUI_DIR / "index.html").read_bytes()
             self._send(200, html, "text/html; charset=utf-8")
             return
+        if parsed.path == "/coverage.html":
+            f = WEBUI_DIR / "coverage.html"
+            if not f.is_file():
+                self._json({"error": "还没有生成覆盖报告，先点「生成覆盖审计报告」"}, 404)
+                return
+            self._send(200, f.read_bytes(), "text/html; charset=utf-8")
+            return
         if parsed.path == "/api/meta":
             evalsets = {k: {**v, "cases": _safe_count(v["path"])}
                         for k, v in EVALSETS.items()}
@@ -433,7 +457,15 @@ class Handler(BaseHTTPRequestHandler):
                     "cases": n,
                 }
                 adapters[eid] = {"label": f"{p['name']}（{p.get('adapter_type')}）"}
-            self._json({"evalsets": evalsets, "adapters": adapters})
+            self._json({
+                "evalsets": evalsets, "adapters": adapters,
+                "judge": {
+                    "configured": load_judge_from_env() is not None,
+                    "model": os.environ.get("EVAL_MODEL_NAME", ""),
+                    "note": "需在启动控制台前 export EVAL_MODEL_URL/NAME/KEY；"
+                            "judge 金标校准通过后才真正参与判定，否则语义断言跳过",
+                },
+            })
             return
         if parsed.path == "/api/projects":
             self._json({"projects": load_projects()})
@@ -480,6 +512,41 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._json({"ok": True, "id": new_case["id"], "total": len(cases)})
             return
+        if path == "/api/coverage":
+            # 生成覆盖账本 HTML 审计报告。规格默认 webui/coverage_spec.json，
+            # 也可在请求体里传 {"spec": [...]} 直接给规格数组（无需落盘）。
+            try:
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                if isinstance(body.get("spec"), list):
+                    import tempfile
+                    fd, tmp = tempfile.mkstemp(suffix=".json", text=True)
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        json.dump(body["spec"], f, ensure_ascii=False)
+                    try:
+                        ledger = build_ledger(tmp)
+                    finally:
+                        os.unlink(tmp)
+                else:
+                    spec = WEBUI_DIR / "coverage_spec.json"
+                    if not spec.is_file():
+                        self._json({"error": "未找到 webui/coverage_spec.json；"
+                                    "参考 agent_eval/examples/demo_project/coverage_spec.json 写一份，"
+                                    "或直接在请求体里传 spec 数组"}, 400)
+                        return
+                    ledger = build_ledger(spec)
+                r = ledger.report()
+                render_coverage_html(ledger, WEBUI_DIR / "coverage.html")
+                self._json({"ok": True, "url": "/coverage.html",
+                            "total": r.total, "covered": r.covered,
+                            "not_covered": r.not_covered,
+                            "high_risk": r.uncovered_high_risk,
+                            "audit_pass": ledger.audit_pass()})
+            except ValueError as e:
+                self._json({"error": str(e)}, 400)
+                return
+            except Exception as e:                        # noqa: BLE001
+                self._json({"error": f"生成失败: {e}"}, 500)
+                return
         if path == "/api/projects":
             try:
                 p = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
@@ -507,6 +574,10 @@ class Handler(BaseHTTPRequestHandler):
             adapter_kind = body["adapter"]
             fixed = bool(body.get("fixed", False))
             baseline = float(body.get("baseline", 1.0))
+            level = str(body.get("level") or "L0").upper()
+            force_uncalibrated = bool(body.get("force_uncalibrated", False))
+            if level not in ("L0", "L1", "L2"):
+                raise ValueError("level 只能是 L0 / L1 / L2")
         except Exception as e:                            # noqa: BLE001
             self._json({"error": f"请求体非法: {e}"}, 400)
             return
@@ -532,13 +603,24 @@ class Handler(BaseHTTPRequestHandler):
                             "hint": "检查服务是否已启动；若为进程内适配器可实现 health() 返回 True"}, 409)
                 return
 
+        judge = load_judge_from_env() if level != "L0" else None
+        judge_note = ""
+        if level != "L0":
+            if judge is None:
+                judge_note = "未配置 EVAL_MODEL_*，P2 语义判分全部跳过（P1 照常跑）"
+            elif force_uncalibrated:
+                judge.mark_calibrated()       # 显式放行，仅本地演示；生产必须跑金标校准
+                judge_note = "⚠ 未校准 judge 已被手动放行（仅供演示，生产禁止）"
+            else:
+                judge_note = "judge 未通过金标校准，语义断言跳过并在报告标注"
+
         try:
             if not _read_cases(Path(meta["path"])):
                 self._json({"error": "评估集还没有用例。先在「用例维护」里添加用例，再跑批",
                             "hint": "用例维护面板：选这个评估集 → 新增用例 → 保存"}, 400)
                 return
             cases = load_evalset(meta["path"])
-            report = BatchRunner(adapter).run_all(cases, level="L0")
+            report = BatchRunner(adapter, judge=judge).run_all(cases, level=level)
         except Exception as e:                            # noqa: BLE001
             self._json({"error": f"跑批失败: {e}"}, 500)
             return
@@ -554,7 +636,10 @@ class Handler(BaseHTTPRequestHandler):
             pass                                          # 快照失败不阻塞跑批结果
 
         gate_ok, reasons = gate_decision(report, baseline_rate=baseline)
-        self._json(serialize_report(report, gate_ok, reasons, baseline))
+        payload = serialize_report(report, gate_ok, reasons, baseline)
+        payload["level"] = level
+        payload["judge_note"] = judge_note
+        self._json(payload)
 
 
     def do_PUT(self):

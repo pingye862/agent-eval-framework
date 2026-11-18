@@ -129,7 +129,7 @@ def render_coverage_html(ledger: CoverageLedger, out_path: str | Path,
     r = ledger.report()
     rate = r.covered / r.total if r.total else 0.0
     audit_ok = ledger.audit_pass()
-    units = sorted(ledger._units.values(), key=lambda u: u.unit_id)
+    units = sorted(ledger.units(), key=lambda u: u.unit_id)
 
     layer_rows = "".join(
         _bar(f"{layer}", b["covered"], b["not"],
@@ -225,9 +225,12 @@ def render_run_report_html(report, out_path: str | Path,
         sem_cell = ""
         for a in o.assertions:
             if a.kind == "semantic":
-                cls = "pill bad" if (a.ok and not a.skipped) and False else (
-                    "pill bad" if not a.ok else ("pill dim" if a.skipped else "pill ok"))
-                sem_cell = f'<span class="{cls}">{html.escape(a.detail[:40] or "通过")}</span>'
+                s = a.result_status()
+                cls = {"passed": "pill ok", "failed": "pill bad",
+                       "skipped": "pill dim", "need_review": "pill dim"}[s]
+                label = {"passed": "通过", "failed": "不达标",
+                         "skipped": "跳过未判", "need_review": "转人工"}[s]
+                sem_cell = f'<span class="{cls}">{label}</span>'
                 break
         rows.append(
             f"<tr><td>{html.escape(o.case.case_id)}</td>"

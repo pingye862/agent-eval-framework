@@ -14,4 +14,6 @@ node_modules/
 
 # 本机生成物
 webui/evalsets/*.json.tmp
+webui/coverage.html
+webui/snapshots/
 *.log

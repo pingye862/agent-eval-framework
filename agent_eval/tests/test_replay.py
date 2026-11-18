@@ -55,7 +55,7 @@ def test_gate_investigate():
 
 
 def test_gate_hold_fills_the_missing_band():
-    # 文档第六节指出的缺档：下降超过噪声带但未到排查线
+    # 缺档验证：下降超过噪声带但未到排查线
     r = ReplayRunner(lambda s: 0.0)
     assert r.gate(0.80, 0.70) == GateVerdict.HOLD         # -10pp
 

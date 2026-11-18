@@ -81,6 +81,15 @@ class AssertionResult:
     detail: str
     layer: AttributionLayer = AttributionLayer.TRAJECTORY
     skipped: bool = False   # True = 未参与判定（如 judge 未校准被跳过），不影响 passed
+    status: str = ""        # 显式状态：passed / failed / skipped / need_review；空则按 ok/skipped 推导
+
+    def result_status(self) -> str:
+        """状态单一来源。禁止用 detail 文本反推状态（文案一改就静默失真）。"""
+        if self.status:
+            return self.status
+        if self.skipped:
+            return "skipped"
+        return "passed" if self.ok else "failed"
 
 
 def assert_case(case: EvalCase, runs: AgentRun | list[AgentRun]) -> list[AssertionResult]:
@@ -242,17 +251,24 @@ class EvalReport:
             for a in o.assertions:
                 if a.kind != "semantic":
                     continue
-                if a.skipped:
+                s = a.result_status()
+                if s == "skipped":
                     stats["skipped"] += 1
-                elif not a.ok:
-                    stats["failed"] += 1
-                    stats["judged"] += 1
-                elif "证据不足转人工" in a.detail:
+                elif s == "need_review":
                     stats["need_review"] += 1
+                    stats["judged"] += 1
+                elif s == "failed":
+                    stats["failed"] += 1
                     stats["judged"] += 1
                 else:
                     stats["judged"] += 1
         return stats
+
+    def review_cases(self) -> list[CaseOutcome]:
+        """judge 转人工的用例（不硬判，但审计必须看得见）。"""
+        return [o for o in self.outcomes
+                if any(a.kind == "semantic" and a.result_status() == "need_review"
+                       for a in o.assertions)]
 
     def versions_summary(self) -> dict:
         """版本四要素汇总（取最后一次记录到的值），供报告留档与版本对比。"""
@@ -276,6 +292,11 @@ class EvalReport:
         if any(o.case.judge_criteria for o in self.outcomes):
             lines.append(f"P2 语义判分: 实判 {sem['judged']} / 失败 {sem['failed']} / "
                          f"转人工 {sem['need_review']} / 跳过 {sem['skipped']}")
+            for o in self.review_cases():
+                lines.append(f"  ⚑ 待复核 {o.case.case_id}: "
+                             + "; ".join(a.detail for a in o.assertions
+                                         if a.kind == "semantic"
+                                         and a.result_status() == "need_review"))
         bad = [o for o in self.outcomes if not o.passed]
         if bad:
             lines.append("-" * 62)
@@ -348,24 +369,27 @@ class BatchRunner:
             return [AssertionResult("semantic", True,
                                     f"P2 语义断言跳过（{why}）: "
                                     f"{len(case.judge_criteria)} 条标准未判",
-                                    AttributionLayer.COMPONENT, skipped=True)]
+                                    AttributionLayer.COMPONENT, skipped=True,
+                                    status="skipped")]
         final_output = runs[-1].final_output
         r = self.judge.judge(case.query, case.judge_criteria, final_output)
         verdict = r.get("verdict", "need_review")
         evidence = r.get("evidence", [])
         if verdict == "pass":
-            return [AssertionResult("semantic", True, "", AttributionLayer.COMPONENT)]
+            return [AssertionResult("semantic", True, "", AttributionLayer.COMPONENT,
+                                    status="passed")]
         if verdict == "need_review":
             return [AssertionResult("semantic", True,
                                     f"judge 证据不足转人工: {'; '.join(evidence[:3])}",
-                                    AttributionLayer.COMPONENT, skipped=True)]
+                                    AttributionLayer.COMPONENT, skipped=True,
+                                    status="need_review")]
         return [AssertionResult("semantic", False,
                                 f"语义判分不达标: {'; '.join(evidence[:3])}",
-                                AttributionLayer.COMPONENT)]
+                                AttributionLayer.COMPONENT, status="failed")]
 
     def _run_repeats(self, case: EvalCase, repeat: int,
                      context: dict | None, level: str = "L0") -> CaseOutcome:
-        """复跑聚合：pass^k 口径（全过才算过），断言明细取第一次运行。"""
+        """复跑聚合：pass^k 口径（全过才算过），断言明细与多轮轨迹取第一次运行。"""
         outcomes = [self.run_case(case, context, level=level) for _ in range(repeat)]
         pass_runs = sum(1 for o in outcomes if o.passed)
         base = outcomes[0]
@@ -374,6 +398,7 @@ class BatchRunner:
             passed=(pass_runs == repeat),
             first_error=base.first_error, attribution=base.attribution,
             pass_runs=pass_runs, total_runs=repeat,
+            runs=base.runs,          # 多轮轨迹必须透传，否则快照只剩第 1 轮
         )
 
     def run_all(self, cases: list[EvalCase], level: str = "L0",
@@ -433,6 +458,10 @@ def write_snapshots(path: str | Path, report: EvalReport) -> int:
     ts = time.strftime("%Y-%m-%dT%H:%M:%S")
     for o in report.outcomes:
         turns = _runs_of(o)
+        semantic = [
+            {"kind": a.kind, "status": a.result_status(), "detail": a.detail}
+            for a in o.assertions if a.kind == "semantic"
+        ]
         for i, r in enumerate(turns):
             records.append({
                 "ts": ts,
@@ -449,6 +478,7 @@ def write_snapshots(path: str | Path, report: EvalReport) -> int:
                 "versions": r.versions,
                 "error": r.error,
                 "passed": o.passed,
+                "semantic": semantic if i == len(turns) - 1 else [],
             })
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)

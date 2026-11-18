@@ -13,14 +13,19 @@
 7. **pass^k 复跑与 flaky 检测**：同一用例复跑 k 次，全过才算过；部分通过自动单列为 flaky
 8. **快照回放**：轨迹自动落 JSONL 快照，`--compare` 对比新旧报告给出四档判定（可合并/不合并/需排查/环境不稳作废）
 9. **覆盖账本可视化**：覆盖单元按层拆解、未覆盖 6 类原因分布、高风险豁免审计红线，一键渲染成单文件 HTML 审计报告
-10. **Web 控制台**：评估集增删改查、自定义项目注册（HTTP/Python 适配器）、跑批与报告展示（零依赖，纯标准库 HTTP server）
+10. **Web 控制台**：评估集增删改查（含多轮 `turns` / P2 `judge_criteria`）、自定义项目注册（HTTP/Python 适配器）、L0/L1/L2 层级跑批、语义判分统计、一键生成覆盖审计报告（零依赖，纯标准库 HTTP server）
 
 ## 目录结构
 
 ```
-agent_eval/               评测框架（9 模块 + 单测 + demo 示例项目）
+agent_eval/               评测框架（11 模块 + 单测 + demo 示例项目）
 webui/                    评测控制台（python3 webui/server.py 启动，默认 8900 端口）
 ```
+
+**模块定位（重要）**：主链路是 `harness.py`（P1 断言 + 批量执行 + 门禁）与 `judge.py`
+（P2 语义判分）。`evaluator.py` / `runner.py` 是「分维度精评 + 多模型投票粗筛」的
+**参考实现，当前未接入主链路**；它们的校准函数（`agreement_rate` / `spearman` /
+`calibrate`）被 `judge.py` 复用。`coverage.py` / `report.py` / `replay.py` 为活代码。
 
 ## 快速开始
 
@@ -31,9 +36,11 @@ python3 run_eval.py
 
 # 2. 启动 Web 控制台
 cd webui && python3 server.py   # http://127.0.0.1:8900
+# 控制台里可选 L0/L1/L2 层级；「生成覆盖审计报告」读 webui/coverage_spec.json
+# （仓库自带一份示例），产出 coverage.html
 ```
 
-单测：`python3 -m pytest agent_eval/tests/ -q`
+单测：`python3 -m pytest agent_eval/tests/ -q`（116 条，含 Web 控制台 API 测试）
 
 ## 接入自己的 Agent
 
@@ -110,9 +117,16 @@ trajectory / component）哪层欠账、未覆盖的 6 类原因分布（「风�
 cd agent_eval/examples/demo_project
 python3 run_eval.py --fixed --coverage
 
+# 想本地看 LLM 语义判分的效果（跳过金标校准，仅限演示）
+python3 run_eval.py --fixed --level L1 --force-uncalibrated
+
 # 自己的账本：写一个覆盖规格 JSON，一行命令出审计报告
 python3 agent_eval/report.py --spec coverage_spec.json --out coverage.html --text
 ```
+
+> **校准红线**：`--force-uncalibrated` 只为本地演示放行未校准 judge。生产/CI 必须
+> 先跑 `calibrate_judge`（≥200 条人工金标，一致率 ≥85% 且 Spearman ≥0.8），
+> 否则语义断言一律跳过，绝不裸判。Web 控制台同样要求显式传 `force_uncalibrated`。
 
 规格格式（未覆盖单元必须标 6 类原因之一，否则审计不过）：
 

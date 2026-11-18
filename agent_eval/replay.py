@@ -1,10 +1,8 @@
 """快照与单变量回放。
 
-对应文档：
-- 快照：锁定召回结果 / 知识片段 / 提示词版本，回放的确定性来源
+- 快照：锁定召回结果 / 提示词版本，回放的确定性来源
 - 回放三种情形：换提示词 / 换模型 / 换知识库 —— 一次只改一个
 - 回放门禁四档：提升可合并 / 保持不合并 / 显著下降需排查 / 环境不稳本次作废
-  （文档第六节指出原型缺「下降但未超阈值」一档，此处已补齐）
 """
 from __future__ import annotations
 
@@ -49,7 +47,7 @@ class SnapshotStore:
 class ReplayRunner:
     """执行回放并对结果打门禁。"""
 
-    # 阈值是设计值，落地前必须用真实数据校准（文档第六节第 8 条）
+    # 阈值是设计值，落地前必须用真实数据校准
     PROMOTE_GAIN = 0.10        # 提升 ≥ 10pp → 可合并
     INVESTIGATE_DROP = 0.20    # 下降 ≥ 20pp → 排查
     NOISE_BAND = 0.03          # |差值| ≤ 3pp 视为噪声 → 作废重跑
@@ -68,7 +66,7 @@ class ReplayRunner:
         return variant, self.agent_fn(variant)
 
     def gate(self, baseline_score: float, replay_score: float) -> GateVerdict:
-        """四档门禁（补齐了文档第六节指出的缺档）。"""
+        """四档门禁（含「下降但未超阈值」这一档）。"""
         delta = replay_score - baseline_score
 
         if abs(delta) <= self.NOISE_BAND:

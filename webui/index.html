@@ -109,6 +109,7 @@
   .assert-list .mark { font-weight: 700; flex-shrink: 0; }
   .assert-list .mark.ok { color: var(--green); }
   .assert-list .mark.no { color: var(--red); }
+  .assert-list .mark.skip { color: var(--amber, #b45309); }
   .assert-list .kind {
     background: var(--grey-bg); border-radius: 4px; padding: 0 6px;
     font-size: 11px; color: var(--muted); flex-shrink: 0; font-family: Menlo, monospace;
@@ -183,12 +184,22 @@
         <label>基线成功率</label>
         <input type="number" id="baseline" value="1.0" min="0" max="1" step="0.01">
       </div>
+      <div class="field">
+        <label>评测层级（L1/L2 启用 LLM 语义判分）</label>
+        <select id="level">
+          <option value="L0">L0 · 仅 P1 断言</option>
+          <option value="L1">L1 · P1 + P2 语义判分</option>
+          <option value="L2">L2 · P1 + P2 语义判分（全量）</option>
+        </select>
+      </div>
       <label class="toggle" id="fixedWrap" style="display:none">
         <input type="checkbox" id="fixed"> 修复缺陷后跑（红→绿演示）
       </label>
       <button class="btn-ghost" id="healthBtn" style="display:none">检测服务连通</button>
       <button class="btn-primary" id="runBtn">运行测试</button>
       <button class="btn-ghost" id="copyBtn" style="display:none">复制文本报告</button>
+      <button class="btn-ghost" id="covBtn">生成覆盖审计报告</button>
+      <span id="judgeHint" class="mini" style="align-self:center"></span>
     </div>
   </div>
 
@@ -239,30 +250,32 @@
       <div id="caseFormWrap" style="display:none;border:1px solid var(--border);border-radius:8px;padding:14px;margin:10px 0;background:#fafbfc">
         <div style="font-weight:600;font-size:13px;margin-bottom:10px" id="caseFormTitle">新增用例</div>
         <div class="grid2">
-          <div class="field"><label>用例 id（唯一）</label><input type="text" id="c_id" placeholder="wutong-net-income-aug"></div>
+          <div class="field"><label>用例 id（唯一）</label><input type="text" id="c_id" placeholder="price-query-001"></div>
           <div class="field"><label>严重级（失败时 blocker 直接拦门禁）</label>
             <select id="c_sev">
               <option value="blocker">blocker（资损级，拦门禁）</option>
               <option value="major" selected>major（功能缺陷）</option>
               <option value="minor">minor（体验瑕疵）</option>
             </select></div>
-          <div class="field"><label>路由 route（可空）</label><input type="text" id="c_route" placeholder="metric_query / clarify / refused"></div>
+          <div class="field"><label>路由 route（可空）</label><input type="text" id="c_route" placeholder="product_consult / price_query / unanswerable"></div>
           <div class="field"><label>负责人 owner（可空）</label><input type="text" id="c_owner" placeholder="eval-owner"></div>
         </div>
         <div class="field" style="margin-top:10px"><label>测试问题 query（发给被测 Agent 的话）</label>
           <textarea id="c_query" rows="2" placeholder="例如：帮我推荐一台 5000 元以内、适合剪辑视频的笔记本，并说明理由"></textarea></div>
         <div class="grid2" style="margin-top:10px">
           <div class="field"><label>答案必须包含的关键词（逗号分隔，可空）</label>
-            <input type="text" id="c_contains" placeholder="130, 收入"></div>
+            <input type="text" id="c_contains" placeholder="5999, 元"></div>
           <div class="field"><label>禁止调用的工具（逗号分隔，可空）</label>
-            <input type="text" id="c_mustnot" placeholder="run_write_sql"></div>
+            <input type="text" id="c_mustnot" placeholder="place_order"></div>
           <div class="field"><label>必须调用的工具（逗号分隔，可空）</label>
-            <input type="text" id="c_mustcall" placeholder="run_sql"></div>
+            <input type="text" id="c_mustcall" placeholder="query_price"></div>
           <div class="field"><label>状态断言 state_after（JSON 数组，可空）</label>
             <textarea id="c_state" rows="2" placeholder='[{"path": "response.status", "value": "completed"}]'></textarea></div>
         </div>
         <div class="field" style="margin-top:10px"><label>多轮对话 turns（JSON 数组，可空）——第 2 轮起的后续轮次，第 1 轮即上面的 query</label>
-          <textarea id="c_turns" rows="3" placeholder='[{"query": "补充：2024 年", "response_contains": ["营业收入"]}]'></textarea></div>
+          <textarea id="c_turns" rows="3" placeholder='[{"query": "补充：要 256G 的", "response_contains": ["256G"]}]'></textarea></div>
+        <div class="field" style="margin-top:10px"><label>P2 语义判分标准 judge_criteria（每行一条，可空）——L1/L2 层级由 LLM judge 判定</label>
+          <textarea id="c_judge" rows="2" placeholder="回答必须给出具体机型和价格，不能只说「请稍后」&#10;回答应说明推荐理由，而不是罗列参数"></textarea></div>
         <div style="margin-top:12px;display:flex;gap:10px">
           <button class="btn-primary" id="caseSaveBtn" onclick="saveCase()">保存用例</button>
           <button class="btn-ghost" onclick="closeCaseForm()">取消</button>
@@ -287,6 +300,7 @@
     <div class="body">
       <span id="bannerTitle"></span>
       <div class="reasons" id="bannerReasons"></div>
+      <div class="reasons" id="bannerExtra" style="display:none;opacity:.8"></div>
     </div>
   </div>
 
@@ -341,7 +355,23 @@ async function init() {
   $('runBtn').onclick = run;
   $('healthBtn').onclick = checkHealth;
   $('copyBtn').onclick = copyReport;
+  $('covBtn').onclick = genCoverage;
   renderProjects();
+}
+
+async function genCoverage() {
+  const btn = $('covBtn');
+  btn.disabled = true; btn.textContent = '生成中…';
+  try {
+    const r = await api('/api/coverage', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    window.open(r.url, '_blank');
+    if (!r.audit_pass)
+      alert(`⚠ 覆盖审计不通过：高风险未覆盖单元 ${r.high_risk.join(', ')}`);
+  } catch (e) { alert('✗ ' + e.message); }
+  btn.disabled = false; btn.textContent = '生成覆盖审计报告';
 }
 
 /* 两个下拉（跑批/用例维护）共用同一份 META；keep 用于保留跑批下拉的选中项 */
@@ -365,6 +395,10 @@ async function refreshMeta(keep) {
   META = await api('/api/meta');
   PROJECTS = (await api('/api/projects')).projects;
   rebuildSelects(keep);
+  const j = META.judge || {};
+  $('judgeHint').textContent = j.configured
+    ? `LLM judge 已配置（${j.model || '未指定模型'}）`
+    : 'LLM judge 未配置（L1/L2 语义判分将跳过）';
 }
 
 /* ---------- 用例维护（评估集增删改查） ---------- */
@@ -391,6 +425,7 @@ function caseSummary(c) {
     parts.push('禁调: ' + c.must_not_call.map(t => t.tool || t).join('|'));
   if ((c.state_after || []).length) parts.push(`状态断言×${c.state_after.length}`);
   if ((c.turns || []).length) parts.push(`多轮×${c.turns.length + 1}`);
+  if ((c.judge_criteria || []).length) parts.push(`语义判分×${c.judge_criteria.length}`);
   return parts.join(' · ') || '—';
 }
 
@@ -422,7 +457,10 @@ function renderCases(cases) {
   </tr>`).join('');
 }
 
+let EDIT_RAW = null;   // 编辑时保留原用例全部字段（含表单未暴露的 context_overrides / persona 等）
+
 function openCaseForm(c) {
+  EDIT_RAW = c ? JSON.parse(JSON.stringify(c)) : null;
   $('caseFormTitle').textContent = c ? `编辑用例：${c.id}` : '新增用例';
   $('c_id').value = c ? c.id : '';
   $('c_id').disabled = false;
@@ -437,6 +475,7 @@ function openCaseForm(c) {
     ? JSON.stringify(c.state_after, null, 1) : '';
   $('c_turns').value = c && (c.turns || []).length
     ? JSON.stringify(c.turns, null, 1) : '';
+  $('c_judge').value = c ? (c.judge_criteria || []).join('\n') : '';
   $('caseFormWrap').dataset.editId = c ? c.id : '';
   $('caseFormWrap').style.display = 'block';
   $('c_id').focus();
@@ -474,7 +513,9 @@ async function saveCase() {
   catch (e) { return cMsg('✗ state_after 格式错误: ' + e.message, false); }
   try { turns = parseTurns($('c_turns').value); }
   catch (e) { return cMsg('✗ turns 格式错误: ' + e.message, false); }
+  const judge = $('c_judge').value.split('\n').map(s => s.trim()).filter(Boolean);
   const c = {
+    ...(EDIT_RAW || {}),          // 未知字段原样保留，编辑不再静默丢数据
     id: $('c_id').value.trim(),
     query: $('c_query').value.trim(),
     severity: $('c_sev').value,
@@ -486,6 +527,7 @@ async function saveCase() {
     state_after: state,
     turns,
   };
+  if (judge.length) c.judge_criteria = judge; else delete c.judge_criteria;
   btn.disabled = true;
   try {
     const body = { path: $('caseEvalset').value, case: c };
@@ -626,7 +668,8 @@ async function run() {
         evalset: $('evalset').value,
         adapter: $('adapter').value,
         fixed: $('fixed').checked,
-        baseline: parseFloat($('baseline').value)
+        baseline: parseFloat($('baseline').value),
+        level: $('level').value
       })
     });
     render(LAST);
@@ -649,6 +692,13 @@ function render(r) {
   $('bannerReasons').textContent = r.gate_ok
     ? `基线 ${Math.round(r.baseline * 100)}%，成功率 ${pct(r.success_rate)}，blocker 全部通过`
     : r.gate_reasons.join('；');
+  const sm = r.semantic_stats;
+  const extras = [];
+  if (r.judge_note) extras.push(r.judge_note);
+  if (sm && (sm.judged || sm.skipped))
+    extras.push(`P2 语义：实判 ${sm.judged} / 失败 ${sm.failed} / 转人工 ${sm.need_review} / 跳过 ${sm.skipped}`);
+  $('bannerExtra').textContent = extras.join(' ｜ ');
+  $('bannerExtra').style.display = extras.length ? 'block' : 'none';
 
   // 统计卡
   $('stats').className = 'stats show';
@@ -686,22 +736,31 @@ function render(r) {
 }
 
 function caseRow(c, i) {
-  const na = c.assertions.length, np = c.assertions.filter(a => a.ok).length;
+  const acted = c.assertions.filter(a => a.status !== 'skipped' && a.status !== 'need_review');
+  const na = acted.length, np = acted.filter(a => a.ok).length;
+  const idle = c.assertions.length - acted.length;
+  const idleTxt = idle ? ` · ${idle} 未判` : '';
   return `<tr class="case-row" data-i="${i}">
     <td><span class="dot ${c.passed ? 'pass' : 'fail'}"></span></td>
     <td><b>${esc(c.id)}</b></td>
     <td><span class="badge ${c.severity}">${c.severity}</span></td>
     <td>${esc(c.query)}</td>
-    <td style="color:${c.passed ? 'var(--green)' : 'var(--red)'}">${np}/${na} 通过</td>
+    <td style="color:${c.passed ? 'var(--green)' : 'var(--red)'}">${np}/${na} 通过${idleTxt}</td>
     <td class="attr ${c.passed ? '' : 'fail'}">${c.passed ? '—' : esc(attributionLabel(c.attribution))}</td>
   </tr>`;
 }
 
 function detailRow(c, i) {
-  const asserts = c.assertions.map(a =>
-    `<li><span class="mark ${a.ok ? 'ok' : 'no'}">${a.ok ? '✓' : '✗'}</span>
-     <span class="kind">${a.kind}</span>
-     <span>${esc(a.detail || '通过')}</span></li>`).join('');
+  const asserts = c.assertions.map(a => {
+    const st = a.status || (a.skipped ? 'skipped' : (a.ok ? 'passed' : 'failed'));
+    const mark = st === 'passed' ? '✓' : st === 'failed' ? '✗' : '—';
+    const cls = st === 'passed' ? 'ok' : st === 'failed' ? 'no' : 'skip';
+    const tag = st === 'skipped' ? ' [跳过未判]'
+              : st === 'need_review' ? ' [转人工复核]' : '';
+    return `<li><span class="mark ${cls}">${mark}</span>
+     <span class="kind">${esc(a.kind)}</span>
+     <span>${esc(a.detail || '通过')}${tag}</span></li>`;
+  }).join('');
   const fe = c.first_error
     ? `<div class="first-err">第一错：<b>${esc(c.first_error.step_id)}</b>
        （${esc(c.first_error.target)}）· 主归因层：${esc(attributionLabel(c.first_error.layer))}

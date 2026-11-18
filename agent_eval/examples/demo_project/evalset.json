@@ -9,7 +9,7 @@
     "must_not_call": [{"tool": "query_product"}],
     "response_contains": ["5999"],
     "state_after": [],
-    "owner": "AP"
+    "owner": "demo"
   },
   {
     "id": "CS-002",
@@ -21,7 +21,7 @@
     "must_not_call": [{"tool": "query_product"}],
     "response_contains": ["8999"],
     "state_after": [],
-    "owner": "AP"
+    "owner": "demo"
   },
   {
     "id": "CS-003",
@@ -30,7 +30,7 @@
     "route": "product_consult",
     "must_call": [{"tool": "query_product", "required_args": ["model", "field"]}],
     "response_contains": ["6.1"],
-    "owner": "AP"
+    "owner": "demo"
   },
   {
     "id": "CS-004",
@@ -39,7 +39,7 @@
     "route": "product_consult",
     "must_call": [{"tool": "query_product", "required_args": ["model"]}],
     "response_contains": ["6.2"],
-    "owner": "AP"
+    "owner": "demo"
   },
   {
     "id": "CS-005",
@@ -51,7 +51,7 @@
     "response_contains": ["5999"],
     "state_after": [{"path": "notify_log", "min_length": 1}],
     "context_overrides": {"notify_required": true},
-    "owner": "AP"
+    "owner": "demo"
   },
   {
     "id": "CS-006",
@@ -65,7 +65,7 @@
       "回答必须明确表示无法回答该问题（因为缺少机型信息），而不是瞎猜一个型号",
       "回答应引导用户补充机型，或提供转人工的路径"
     ],
-    "owner": "AP"
+    "owner": "demo"
   },
   {
     "id": "CS-007",
@@ -74,7 +74,7 @@
     "route": "product_consult",
     "must_call": [{"tool": "query_product"}],
     "judge_criteria": ["回答中的芯片型号必须与知识库事实一致，不能编造"],
-    "owner": "AP"
+    "owner": "demo"
   },
   {
     "id": "CS-008",
@@ -83,6 +83,6 @@
     "route": "price_query",
     "must_call": [{"tool": "query_price"}],
     "response_contains": ["4599"],
-    "owner": "AP"
+    "owner": "demo"
   }
 ]

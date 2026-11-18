@@ -209,7 +209,7 @@ def _turn_case(**kw):
 def test_multiturn_session_shared():
     """多轮用例：各轮共享同一 session_id，adapter 收到 turn_index。"""
     a = TurnAdapter()
-    case = _turn_case(query="查收入", turns=[{"query": "再查利润"}])
+    case = _turn_case(query="查销量", turns=[{"query": "再查库存"}])
     r = BatchRunner(a).run_all([case])
     assert r.passed == 1
     assert len(a.seen_contexts) == 2
@@ -223,9 +223,9 @@ def test_multiturn_turn_level_contains():
     """轮次级 response_contains：断言落在对应轮次的输出上。"""
     a = TurnAdapter(reply_by_turn={
         0: {"output": "已为您查询，请问还需要什么"},
-        1: {"output": "2024 年营业收入 130 元"},
+        1: {"output": "2024 年销量 130 台"},
     })
-    case = _turn_case(query="查收入", turns=[
+    case = _turn_case(query="查销量", turns=[
         {"query": "补充：2024 年", "response_contains": ["130"]},
     ])
     r = BatchRunner(a).run_all([case])
@@ -235,7 +235,7 @@ def test_multiturn_turn_level_contains():
 def test_multiturn_turn_level_fail_message():
     """轮次级断言失败时，报错信息标注轮次。"""
     a = TurnAdapter(reply_by_turn={0: {"output": "第一轮回复"}, 1: {"output": "答非所问"}})
-    case = _turn_case(query="查收入", turns=[
+    case = _turn_case(query="查销量", turns=[
         {"query": "补充", "response_contains": ["130"]},
     ])
     r = BatchRunner(a).run_all([case])
@@ -248,7 +248,7 @@ def test_multiturn_must_call_union():
     """must_call 看全程并集：工具在第 1 轮调用、断言写在案例级，仍通过。"""
     a = TurnAdapter(reply_by_turn={0: {"tools": ["run_sql"], "output": "查询中"},
                                    1: {"output": "结果是 130"}})
-    case = _turn_case(query="查收入", turns=[{"query": "补充"}],
+    case = _turn_case(query="查销量", turns=[{"query": "补充"}],
                       must_call=[{"tool": "run_sql"}])
     r = BatchRunner(a).run_all([case])
     assert r.outcomes[0].passed
@@ -258,7 +258,7 @@ def test_multiturn_must_not_call_union_catches():
     """must_not_call 看全程并集：任何一轮出现禁止调用都算失败。"""
     a = TurnAdapter(reply_by_turn={0: {"output": "ok"},
                                    1: {"tools": ["delete_record"], "output": "已删除"}})
-    case = _turn_case(query="查收入", turns=[{"query": "帮我删了"}],
+    case = _turn_case(query="查销量", turns=[{"query": "帮我删了"}],
                       must_not_call=[{"tool": "delete_record"}])
     r = BatchRunner(a).run_all([case])
     o = r.outcomes[0]
@@ -270,7 +270,7 @@ def test_multiturn_must_not_call_union_catches():
 def test_multiturn_response_contains_on_final_turn():
     """案例级 response_contains 只看最后一轮输出。"""
     a = TurnAdapter(reply_by_turn={0: {"output": "没有答案"}, 1: {"output": "最终答案是 130"}})
-    case = _turn_case(query="查收入", turns=[{"query": "补充"}],
+    case = _turn_case(query="查销量", turns=[{"query": "补充"}],
                       response_contains=["130"])
     r = BatchRunner(a).run_all([case])
     assert r.outcomes[0].passed
@@ -284,7 +284,7 @@ def test_multiturn_error_in_later_turn():
                 return AgentRun(query=query, final_output="", error="boom")
             return super().run(query, context)
 
-    case = _turn_case(query="查收入", turns=[{"query": "补充"}])
+    case = _turn_case(query="查销量", turns=[{"query": "补充"}])
     r = BatchRunner(BrokenTurn()).run_all([case])
     o = r.outcomes[0]
     assert not o.passed
@@ -298,7 +298,7 @@ def test_write_snapshots_jsonl(tmp_path):
     """快照：每轮一条记录，字段齐全，追加模式累计。"""
     a = TurnAdapter(reply_by_turn={0: {"tools": ["run_sql"], "output": "查询中"},
                                    1: {"output": "130 元"}})
-    case = _turn_case(query="查收入", turns=[{"query": "补充"}],
+    case = _turn_case(query="查销量", turns=[{"query": "补充"}],
                       response_contains=["130"])
     r = BatchRunner(a).run_all([case])
     p = tmp_path / "snapshots.jsonl"
