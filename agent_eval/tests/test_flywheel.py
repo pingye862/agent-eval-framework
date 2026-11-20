@@ -407,8 +407,8 @@ def test_compare_reports_case_diffs_and_perf():
     def rep(rate, out, lat, tok, env="local", passed=True):
         return {"success_rate": rate, "env": env,
                 "perf": {"avg_latency_ms": lat, "total_tokens": tok},
-                "cases": [{"id": "c1", "severity": "major", "passed": passed,
-                           "flaky": False, "final_output": out}]}
+                "cases": [{"id": "c1", "case_hash": "h-c1", "severity": "major",
+                           "passed": passed, "flaky": False, "final_output": out}]}
     d = compare_reports(rep(0.75, "没查到", 100, 1000, passed=False),
                         rep(1.0, "4599 元", 260, 2400))
     assert d["case_diffs"][0]["id"] == "c1"
@@ -421,7 +421,7 @@ def test_compare_reports_case_diffs_and_perf():
 def test_compare_reports_env_mismatch_invalidates():
     def rep(env, rate):
         return {"success_rate": rate, "env": env,
-                "cases": [{"id": "c1", "severity": "major",
+                "cases": [{"id": "c1", "case_hash": "h-c1", "severity": "major",
                            "passed": True, "flaky": False}]}
     d = compare_reports(rep("staging", 0.70), rep("production", 0.95))
     assert d["env_mismatch"] is True
@@ -433,7 +433,7 @@ def test_compare_reports_legacy_format_still_works():
     """旧报告（无 fingerprint / perf / final_output）不能炸。"""
     def rep(rate):
         return {"total": 10, "passed": round(rate * 10), "success_rate": rate,
-                "cases": [{"id": f"c{i}", "severity": "major",
+                "cases": [{"id": f"c{i}", "case_hash": f"h-c{i}", "severity": "major",
                            "passed": True, "flaky": False} for i in range(10)]}
     d = compare_reports(rep(0.70), rep(0.85))
     assert d["case_diffs"] == [] and d["perf_delta"] == {}
@@ -442,7 +442,7 @@ def test_compare_reports_legacy_format_still_works():
 
 def test_compare_rejects_removed_failed_cases():
     old = {"success_rate": 0.7, "cases": [
-        {"id": str(i), "passed": i < 7} for i in range(10)]}
+        {"id": str(i), "case_hash": f"h-{i}", "passed": i < 7} for i in range(10)]}
     new = {"success_rate": 1.0, "cases": old["cases"][:7]}
     diff = compare_reports(old, new)
     assert diff["delta_pp"] == 30.0

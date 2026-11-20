@@ -436,7 +436,8 @@ def test_compare_reports_and_format():
         return {"total": len(pairs),
                 "passed": sum(1 for *_x, p, _f in pairs if p),
                 "success_rate": sum(1 for *_x, p, _f in pairs if p) / len(pairs),
-                "cases": [{"id": cid, "severity": sev, "passed": p, "flaky": fl}
+                "cases": [{"id": cid, "case_hash": f"h-{cid}", "severity": sev,
+                           "passed": p, "flaky": fl}
                           for cid, sev, p, fl in pairs]}
 
     old = _dump([("a", "blocker", True, False), ("b", "major", True, False),
@@ -458,7 +459,8 @@ def test_compare_reports_noise_band():
 
     def _dump(rate):
         return {"total": 10, "passed": round(rate * 10), "success_rate": rate,
-                "cases": [{"id": f"c{i}", "severity": "major", "passed": True, "flaky": False}
+                "cases": [{"id": f"c{i}", "case_hash": f"h-c{i}",
+                           "severity": "major", "passed": True, "flaky": False}
                           for i in range(10)]}
 
     d = compare_reports(_dump(0.90), _dump(0.88))     # -2pp，噪声带内
@@ -470,7 +472,8 @@ def test_compare_reports_promote():
 
     def _dump(rate):
         return {"total": 10, "passed": round(rate * 10), "success_rate": rate,
-                "cases": [{"id": f"c{i}", "severity": "major", "passed": True, "flaky": False}
+                "cases": [{"id": f"c{i}", "case_hash": f"h-c{i}",
+                           "severity": "major", "passed": True, "flaky": False}
                           for i in range(10)]}
 
     d = compare_reports(_dump(0.70), _dump(0.85))

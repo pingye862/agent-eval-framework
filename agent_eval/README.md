@@ -30,7 +30,7 @@ agent_eval/
 
 ```bash
 cd agent_eval
-python -m pytest tests/ -v          # 框架自身单元测试（与 webui 测试合计 158 条）
+python -m pytest tests/ -v          # 框架自身单元测试（与 webui 测试合计 230 条，以 --collect-only 为准）
 
 # 完整接入示例（推荐先跑这个）
 cd examples/demo_project
@@ -70,11 +70,13 @@ judge 的证据核验才有数据；不带也能跑，相关能力自动标 skip
 
 **第 2 步：准备评估集**（JSON，参考 `evalset.json`）
 
-关键字段：`severity`（blocker 一票否决）、`dataset`（smoke / regression / baseline 分层）、
-`must_call` / `must_not_call`（轨迹断言）、`response_contains`（结果断言）、
-`state_after`（副作用断言）、`context_overrides`（用例级前置状态）、
-`judge_criteria`（P2 语义判分标准）、`tool_result_used` / `output_grounded_in`
-（证据接地断言，见根目录 README）。
+关键字段（完整清单以 `evalset.py` 的 `EvalCase` 为唯一真源，见根目录 README
+的字段字典）：`severity`（blocker 一票否决）、`dataset`（smoke / regression /
+baseline 分层）、`must_call` / `must_not_call`（轨迹断言）、`response_contains`
+（结果断言）、`state_after`（副作用断言）、`context_overrides`（用例级前置状态）、
+`turns`（多轮后续轮次）、`judge_criteria`（P2 语义判分标准）、
+`tool_result_used` / `output_grounded_in`（证据接地断言）。
+`route` / `persona` / `owner` 为报告标签，不参与判定。
 
 **第 3 步：命令行跑批**
 

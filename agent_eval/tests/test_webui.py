@@ -241,3 +241,24 @@ def test_validate_case_keeps_flywheel_fields():
     assert c["dataset"] == "baseline"
     assert c["tool_result_used"] == [{"tool": "t", "min_values": 1}]
     assert c["output_grounded_in"] == {"min_values": 2}
+
+
+def test_serialize_report_exposes_undetermined():
+    """报告序列化必须暴露 undetermined 口径，且保留全部旧键。"""
+    c = EvalCase(case_id="b1", query="q", severity="blocker",
+                 judge_criteria=["须回答完整"])
+    r = BatchRunner(StubAdapter()).run_all([c], level="L1")   # 无 judge → 全 skipped
+    d = server.serialize_report(r, True, [], 1.0)
+    for key in ("total", "passed", "success_rate", "blockers_failed",
+                "fingerprint", "perf", "semantic_stats", "cases"):
+        assert key in d
+    assert d["undetermined"] == 1 and d["undetermined_total"] == 1
+    assert d["determined_total"] == 0
+    assert d["undetermined_cases"] == ["b1"]
+    assert d["blockers_undetermined"] == ["b1"]
+    assert d["cases"][0]["case_status"] == "undetermined"
+
+
+def test_demo_evalset_label_count():
+    """注册表标签里的用例数必须与实际 evalset.json 一致。"""
+    assert "9 条" in server.EVALSETS["demo"]["label"]

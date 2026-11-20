@@ -218,8 +218,10 @@ class SemanticJudge:
         try:
             raw = self.client.chat(JUDGE_SYSTEM_PROMPT, user)
             result = _parse_verdict(raw)
-        except JudgeError as e:
-            self.last_errors.append(str(e))
+        except Exception as e:  # noqa: BLE001 - 自定义 client 的任何异常都降级
+            # 只捕获 JudgeError 时，自定义 client 抛 RuntimeError/ValueError 会
+            # 冒泡到 harness 中断整批；与「任何调用失败都降级」的承诺相悖。
+            self.last_errors.append(f"{type(e).__name__}: {e}")
             self.last_errors = self.last_errors[-10:]
             result = {"verdict": "need_review", "evidence": [f"judge 调用降级: {e}"]}
         if self.cache_judgments and result["verdict"] != "need_review":

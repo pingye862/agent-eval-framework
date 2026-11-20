@@ -17,7 +17,7 @@
 5. **归因双口径**：链路第一错（按断言链路顺序，定位用）+ 主归因层（按 system > trajectory > component 固定优先级从全部失败断言中选，定责用；语义判分失败归 component）
 6. **门禁判定**：blocker 用例一票否决（不参与百分比稀释）+ 成功率回落基线超阈值拦截
 7. **pass^k 复跑与 flaky 检测**：同一用例复跑 k 次，全过才算过；部分通过自动单列为 flaky
-8. **快照回放**：轨迹自动落 JSONL 快照，`--compare` 对比新旧报告给出四档判定（可合并/不合并/需排查/环境不稳作废）
+8. **快照留档 + 报告级对比**：轨迹自动落 JSONL 快照（当前只写不回读，供外部对接 / 留档），`--compare` 基于两份报告 JSON 做逐题 diff + 四档判定（可合并/不合并/需排查/环境不稳作废）
 9. **覆盖账本可视化**：覆盖单元按层拆解、未覆盖 6 类原因分布、高风险豁免审计红线，一键渲染成单文件 HTML 审计报告
 10. **Web 控制台**：评估集增删改查（含多轮 `turns` / P2 `judge_criteria` / 证据接地断言 / `dataset` 标签）、自定义项目注册（HTTP/Python 适配器）、L0/L1/L2 层级跑批、语义判分统计、一键生成覆盖审计报告（零依赖，纯标准库 HTTP server）
 11. **数据飞轮最小闭环**：`dataset` 分层（smoke / regression / baseline）→ 失败样本导出候选回归用例 → 人工确认后安全回灌 → 逐题 diff 版本对比（含延迟 / Token）→ 运行指纹（run_id / env / 配置签名）保证「可比的报告才放一起比」
@@ -31,8 +31,11 @@ docs/                     小白上手指南（getting-started-zh.md，10 分钟
 ```
 
 **模块定位（重要）**：主链路是 `harness.py`（P1 断言 + 批量执行 + 归因 + 门禁）与
-`judge.py`（P2 语义判分 + 金标校准统计）。`coverage.py` / `report.py` / `replay.py`
-为活代码。仓库不含未接线的「参考实现」——每个模块都在主链路上。
+`judge.py`（P2 语义判分 + 金标校准统计）。`coverage.py` / `report.py` 经门面
+`agent_eval_lib.py` 暴露，`replay.py` 的四档阈值被 `compare_reports` 复用。
+另有库内可复用、但未接 CLI 的组件：`SnapshotStore` / `GateVerdict`
+（`replay.py` / `models.py`）与 `render_run_report_html`（`report.py`）——
+它们不是死代码，但也不在主跑批链路上，不要误以为「每个模块都在主链路上」。
 
 ## 快速开始
 
@@ -50,7 +53,7 @@ cd webui && python3 server.py   # http://127.0.0.1:8900
 # （仓库自带一份示例），产出 coverage.html
 ```
 
-单测：`python3 -m pytest agent_eval/tests/ -q`（158 条，含 Web 控制台 API 与数据飞轮闭环测试）
+单测：`python3 -m pytest agent_eval/tests/ -q`（230 条，含 Web 控制台 API、数据飞轮闭环与门禁可靠性回归；数字以 `--collect-only` 为准）
 
 ## 数据飞轮最小闭环：Bad Case → 回归资产
 
@@ -189,11 +192,25 @@ print(eval_report.semantic_stats())     # 实判 / 失败 / 转人工 / 跳过
 | `output_grounded_in` | 回答里至少命中 N 个来自执行证据的值 | 整段结论缺乏证据支撑 |
 
 值匹配会做归一化（`5,999` ↔ `5999`、全角 ↔ 半角、大小写、空白）。
-可用 `values` 显式指定期望值，不填则从工具返回值/召回片段自动抽取。
+可用 `values` 显式指定期望值，不填则从工具返回值/召回片段自动抽取；
+显式 `values` 会按归一化结果去重，重复值不能凑满 `min_values`。
 **adapter 没上报 `ToolCallRecord.result` 时标 `skipped`**，不硬判。
 
 `dataset` 标签（默认 `regression`）用于分层跑批：`smoke` 冒烟集、
 `regression` 回归集、`baseline` 基准集，也允许自定义值。
+
+### 门禁可靠性：跳过 ≠ 通过
+
+用例有三态：`passed` / `failed` / `undetermined`。当一条用例的所有断言都被
+跳过（judge 未配置或未校准、返回 `need_review`、adapter 未上报工具返回值），
+它**不计入通过率的分子与分母**，报告单列 `undetermined_total` /
+`determined_total` / `undetermined_cases`。其中 **blocker 未有效测试时门禁
+直接拒绝放行**——绿灯里不允许混着没真正测过的用例。其余未定用例只标注、
+不阻断。空报告（0 条用例）与全部未定的报告同样拒绝放行。
+
+> **升级提示**：从旧版本升级后，若评估集中存在「只写 `judge_criteria`、
+> 没有任何 P1 断言」的 blocker 用例，在 judge 未上岗时会由「放行」变为
+> 「未定 → 拦截」。这是预期的语义修正，请为这类用例补至少一条 P1 断言。
 
 ## 覆盖账本可视化
 
@@ -215,7 +232,8 @@ python3 agent_eval/report.py --spec coverage_spec.json --out coverage.html --tex
 
 > **校准红线**：`--force-uncalibrated` 只为本地演示放行未校准 judge。生产/CI 必须
 > 先跑 `calibrate_judge`（≥200 条人工金标，一致率 ≥85% 且 Cohen's κ ≥0.8），
-> 否则语义断言一律跳过，绝不裸判。Web 控制台同样要求显式传 `force_uncalibrated`。
+> 否则语义断言一律跳过，绝不裸判。`/api/run` 请求体支持 `force_uncalibrated`
+> （仅 API 调用可用，Web 控制台前端不暴露该控件，避免误点）。
 
 规格格式（未覆盖单元必须标 6 类原因之一，否则审计不过）：
 

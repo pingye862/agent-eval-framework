@@ -45,11 +45,16 @@ def _validate_assertions(location: str, spec: dict) -> None:
 
 def _validate_item(path: str | Path, i: int, item: dict) -> None:
     """单条用例的深度校验：枚举值 + 字段类型。半成品评估集不许进门禁。"""
-    missing = [k for k in REQUIRED if not str(item.get(k) or "").strip()]
+    # 必填字段必须是非空字符串：旧写法 str(v or "") 只判真值，会让
+    # id=[1,2] 通过校验后在去重时抛 unhashable TypeError，或让 int/bool
+    # 静默变成 case_id 污染下游所有字符串假设。与 dataset 校验同口径。
+    missing = [k for k in REQUIRED
+               if not isinstance(item.get(k), str) or not item[k].strip()]
     if missing:
-        raise ValueError(f"{path} 第 {i} 条缺少必填字段: {missing}")
+        raise ValueError(f"{path} 第 {i} 条缺少必填字段或类型错误"
+                         f"（应为非空字符串）: {missing}")
     sev = item["severity"]
-    if sev not in VALID_SEVERITY:
+    if not isinstance(sev, str) or sev not in VALID_SEVERITY:
         raise ValueError(
             f"{path} 第 {i} 条 severity 非法: {sev!r}（允许 {VALID_SEVERITY}）")
     for k in _LIST_FIELDS:
@@ -105,7 +110,8 @@ def _validate_item(path: str | Path, i: int, item: dict) -> None:
             unknown = set(t) - TURN_KEYS
             if unknown:
                 raise ValueError(f"{path} 第 {i} 条 turns[{j}] 含未知字段: {sorted(unknown)}（允许 {sorted(TURN_KEYS)}）")
-            if not str(t.get("query") or "").strip():
+            tq = t.get("query")
+            if not isinstance(tq, str) or not tq.strip():
                 raise ValueError(f"{path} 第 {i} 条 turns[{j}] 缺少非空 query")
             _validate_assertions(f"{path} 第 {i} 条 turns[{j}].", t)
 

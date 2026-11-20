@@ -108,6 +108,11 @@ python3 run_eval.py --gate --baseline 0.95 ; echo "退出码: $?"
 `--baseline 0.95` 的意思：历史成功率基线是 95%，这次比基线掉超过 2 个百分点就拦截。  
 （防「这次 90%、上次 96%，平均看着还行」的温水煮青蛙式劣化。）
 
+`--gate` 是显式门禁模式：额外打印放行依据。**退出码始终由门禁判定决定**
+（0 放行 / 1 拦截），加不加 `--gate` 都会判定，所以 CI 里写不写它都能拦住。
+另外，空报告、全部用例未有效测试（judge 未上岗 / `need_review` / adapter 未上报
+返回值）、以及 blocker 未有效测试，也都会拒绝放行——绿灯里不会混着没测过的用例。
+
 ---
 
 ## 4. 不想敲命令？用 Web 界面
@@ -234,19 +239,28 @@ class MyAgentAdapter(AgentAdapter):
 
 **用例字段字典**（按需加，全部可选除前三项）：
 
-| 字段                  | 类型     | 作用                                             | 例子                                                     |
-| ------------------- | ------ | ---------------------------------------------- | ------------------------------------------------------ |
-| `id`                | 字符串，必填 | 用例编号，报告里靠它定位                                   | `"T-001"`                                              |
-| `query`             | 字符串，必填 | 用户的原话                                          | `"查下明天天气"`                                             |
-| `severity`          | 三选一，必填 | 严重级别：`blocker` 挂一条就拦截；`major` 计入成功率；`minor` 提示 | `"blocker"`                                            |
-| `must_call`         | 数组     | 必须调用的工具（可带参数存在性检查）                             | `[{"tool": "get_weather", "required_args": ["city"]}]` |
-| `must_not_call`     | 数组     | 禁止调用的工具                                        | `[{"tool": "delete_record"}]`                          |
-| `response_contains` | 数组     | 回答里必须出现的关键词                                    | `["晴", "25 度"]`                                        |
-| `state_after`       | 数组     | 执行完后的状态检查（副作用）                                 | `[{"path": "notify_log", "min_length": 1}]`            |
-| `context_overrides` | 对象     | 这条用例的前置条件（如 VIP 身份）                            | `{"notify_required": true}`                            |
-| `persona`           | 字符串    | 用户画像备注，给人看的                                    | `"VIP 用户"`                                             |
-| `judge_criteria`    | 数组     | 语义判分标准（自然语言），见第 7 节                            | `["不得编造数据"]`                                           |
-| `turns`             | 数组     | 多轮对话的后续轮次，见第 7 节                               | `[{"query": "那后天呢"}]`                                  |
+| 字段                    | 类型     | 作用                                             | 例子                                                     |
+| --------------------- | ------ | ---------------------------------------------- | ------------------------------------------------------ |
+| `id`                  | 字符串，必填 | 用例编号，报告里靠它定位（必须是非空字符串）                     | `"T-001"`                                              |
+| `query`               | 字符串，必填 | 用户的原话                                          | `"查下明天天气"`                                             |
+| `severity`            | 三选一，必填 | 严重级别：`blocker` 挂一条就拦截；`major` 计入成功率；`minor` 提示 | `"blocker"`                                            |
+| `dataset`             | 字符串    | 分层跑批标签，默认 `regression`；可填 `smoke` / `baseline` 或自定义 | `"smoke"`                                              |
+| `must_call`           | 数组     | 必须调用的工具（可带参数存在性检查）                             | `[{"tool": "get_weather", "required_args": ["city"]}]` |
+| `must_not_call`       | 数组     | 禁止调用的工具                                        | `[{"tool": "delete_record"}]`                          |
+| `response_contains`   | 数组     | 回答里必须出现的关键词                                    | `["晴", "25 度"]`                                        |
+| `state_after`         | 数组     | 执行完后的状态检查（副作用）                                 | `[{"path": "notify_log", "min_length": 1}]`            |
+| `context_overrides`   | 对象     | 这条用例的前置条件（如 VIP 身份），会真正注入执行 context          | `{"notify_required": true}`                            |
+| `turns`               | 数组     | 多轮对话第 2 轮起的后续轮次，每轮可带 `query` / `response_contains` / `must_call` / `must_not_call` | `[{"query": "那后天呢"}]`          |
+| `tool_result_used`    | 数组     | 证据接地：指定工具的返回值至少 N 个值出现在回答里                     | `[{"tool": "query_price", "min_values": 1}]`           |
+| `output_grounded_in`  | 对象     | 证据接地：回答至少命中 N 个来自执行证据的值                        | `{"min_values": 2}`                                    |
+| `judge_criteria`      | 数组     | 语义判分标准（自然语言），见第 7 节                            | `["不得编造数据"]`                                           |
+| `route`               | 字符串    | 业务路由标签（写进报告，不注入 adapter、不参与判定）                  | `"metric_query"`                                       |
+| `persona`             | 字符串    | 用户画像备注，给人看的                                    | `"VIP 用户"`                                             |
+| `owner`               | 字符串    | 出题人（金标追溯用）                                    | `"ye-ping"`                                            |
+
+> 字段清单以 `agent_eval/evalset.py` 的 `EvalCase` 为唯一真源；`route` /
+> `persona` / `owner` 目前只是报告标签，不参与判定。`context_overrides` 与
+> `dataset` 会真正影响执行，别当成备注字段。
 
 > **出题心法**：`blocker` 只留给「错了就是事故」的场景（转账金额错、删库），  
 > 别全标 blocker——满卷都是重点等于没有重点。参考 demo 的 9 条：5 blocker / 3 major / 1 minor。
@@ -315,7 +329,7 @@ demo 的 CS-006 就是「不会 + 刁钻」格：问电池容量（知识库里�
 }
 ```
 
-写在 `turns` 里的断言只检查对应轮次：`response_contains` 看当轮回答，`must_call` / `must_not_call` 看当轮工具调用。写在用例顶层的工具断言仍检查全程；`required_args` 要求至少一次真实调用同时包含所有指定参数。
+写在 `turns` 里的断言只检查对应轮次：`response_contains` 看当轮回答，`must_call` / `must_not_call` 看当轮工具调用。写在用例顶层的工具断言仍检查全程；`required_args` 要求**至少一次真实调用同时包含所有指定参数**（不跨调用拼接），判定实现以 `agent_eval/harness.py` 为准。
 
 ### 7.2 LLM 语义判分（P2）
 

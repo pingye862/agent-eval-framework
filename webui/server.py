@@ -88,7 +88,7 @@ class DemoScopedAdapter(AgentAdapter):
 
 EVALSETS = {
     "demo": {
-        "label": "数码导购示例（8 条，含缺陷开关）",
+        "label": "数码导购示例（9 条，含缺陷开关）",
         "path": str(DEMO_DIR / "evalset.json"),
         "adapters": ["demo"],
     },

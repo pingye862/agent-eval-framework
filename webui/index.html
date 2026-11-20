@@ -765,6 +765,9 @@ function render(r) {
   const sm = r.semantic_stats;
   const extras = [];
   if (r.judge_note) extras.push(r.judge_note);
+  const undetermined = r.undetermined_total || 0;
+  if (undetermined)
+    extras.push(`未定 ${undetermined} 条（未有效测试，不计入通过率）`);
   if (sm && (sm.judged || sm.skipped))
     extras.push(`P2 语义：实判 ${sm.judged} / 失败 ${sm.failed} / 转人工 ${sm.need_review} / 跳过 ${sm.skipped}`);
   $('bannerExtra').textContent = extras.join(' ｜ ');
@@ -774,10 +777,15 @@ function render(r) {
   $('stats').className = 'stats show';
   $('stRate').textContent = pct(r.success_rate);
   $('stRate').className = 'num ' + (r.success_rate >= r.baseline ? 'green' : 'red');
-  $('stPassed').textContent = `${r.passed} / ${r.total}`;
+  // 分母用有效判定数：未测过的用例不能显示成「已通过 / 总数」
+  const determined = r.determined_total === undefined ? r.total : r.determined_total;
+  $('stPassed').textContent = `${r.passed} / ${determined}`;
   const bf = r.blockers_failed.length;
-  $('stBlocker').textContent = bf === 0 ? '0（全过）' : `${bf} ⛔`;
-  $('stBlocker').className = 'num ' + (bf === 0 ? 'green' : 'red');
+  const bu = (r.blockers_undetermined || []).length;
+  const blocked = bf + bu;
+  $('stBlocker').textContent = blocked === 0 ? '0（全过）'
+    : (bu ? `${bf} 失败 + ${bu} 未测 ⛔` : `${bf} ⛔`);
+  $('stBlocker').className = 'num ' + (blocked === 0 ? 'green' : 'red');
 
   // 版本四要素
   const v = r.versions;

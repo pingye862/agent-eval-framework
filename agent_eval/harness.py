@@ -52,20 +52,41 @@ def _merged_trace(runs: list[AgentRun]) -> dict:
 
 
 def _judge_accepts_trace(judge) -> bool:
-    """能力探测：第三方自定义 judge 可能仍是 3 参数签名，不能强行传第 4 个。"""
+    """能力探测：调用处按关键字 trace= 传第 4 个参数，需真实校验能否绑定。
+
+    旧实现用「位置参数 ≥ 4」推断，会把 judge(self,q,c,o,ctx=None) 误判为可接收
+    trace，实际调用抛 TypeError 中断整批。改用 bind 试绑定四参关键字调用；
+    3 参签名 / 命名参数不是 trace 的签名都会正确返回 False，走三参调用。
+    """
     try:
         sig = inspect.signature(judge.judge)
+        sig.bind("q", ["c"], "o", trace=None)
     except (TypeError, ValueError):
         return False
-    params = list(sig.parameters.values())
-    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params):
-        return True
-    if "trace" in sig.parameters:
-        return True
-    positional = [p for p in params if p.kind in
-                  (inspect.Parameter.POSITIONAL_ONLY,
-                   inspect.Parameter.POSITIONAL_OR_KEYWORD)]
-    return len(positional) >= 4
+    return True
+
+
+def _normalize_verdict(raw) -> dict:
+    """把自定义 judge 的返回值收敛成 {verdict, evidence}。
+
+    自定义 judge 是公开扩展点，返回值不受 judge.py 的 _parse_verdict 保护：
+    非 dict / 非法 verdict / evidence 非 list 一律降级 need_review，对齐
+    judge.py:161-163 与 JUDGE_SYSTEM_PROMPT「证据不足不硬判」。判分器故障
+    不能被当成「回答不合格」而误拦截 blocker。
+    """
+    if not isinstance(raw, dict):
+        return {"verdict": "need_review",
+                "evidence": [f"judge 返回值非对象: {raw!r}"[:160]]}
+    verdict = raw.get("verdict")
+    if verdict not in ("pass", "fail", "need_review"):
+        return {"verdict": "need_review",
+                "evidence": [f"judge verdict 非法: {verdict!r}"]}
+    evidence = raw.get("evidence") or []
+    if not isinstance(evidence, list):
+        # 契约不符（而非仅仅格式宽松）：降级 need_review，避免拿可疑返回值硬判
+        return {"verdict": "need_review",
+                "evidence": [f"judge evidence 非数组: {type(evidence).__name__}"]}
+    return {"verdict": verdict, "evidence": [str(e) for e in evidence]}
 
 
 # ---------- 你的 Agent 要返回的东西 ----------
@@ -178,18 +199,33 @@ def _iter_scalars(obj, _depth: int = 0):
             yield from _iter_scalars(v, _depth + 1)
 
 
+def _dedup_pairs(pairs) -> list[tuple[str, str]]:
+    """证据值按归一化结果去重的唯一实现。
+
+    tool_result_used 的显式 values / output_grounded_in / _evidence_pairs 三条
+    路径必须共用它：否则重复值（"100","100","100" 或归一化后同值）能凑满
+    min_values，把接地失败的样本静默判成通过。
+    """
+    uniq: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for raw, n in pairs:
+        if not n or n in seen:
+            continue
+        seen.add(n)
+        uniq.append((raw, n))
+    return uniq
+
+
 def _evidence_pairs(obj) -> list[tuple[str, str]]:
     """从返回值抽出 (原值, 归一化值) 候选，过滤太短/太长的噪音，去重。"""
     pairs: list[tuple[str, str]] = []
-    seen: set[str] = set()
     for v in _iter_scalars(obj):
         raw = str(v).strip()
         n = _norm_value(raw)
-        if len(n) < 2 or len(n) > 80 or n in seen:
+        if len(n) < 2 or len(n) > 80:
             continue
-        seen.add(n)
         pairs.append((raw[:60], n))
-    return pairs
+    return _dedup_pairs(pairs)
 
 
 def _grounding_assertions(case: EvalCase, runs: list[AgentRun]) -> list[AssertionResult]:
@@ -211,7 +247,7 @@ def _grounding_assertions(case: EvalCase, runs: list[AgentRun]) -> list[Assertio
     results: list[AssertionResult] = []
     all_calls = [t for r in runs for t in r.tool_calls]
     all_retrieved = [x for r in runs for x in (r.retrieved or [])]
-    final_output = runs[-1].final_output or ""
+    final_output = (runs[-1].final_output or "") if runs else ""
     norm_out = _norm_value(final_output)
 
     for spec in case.tool_result_used:
@@ -220,12 +256,15 @@ def _grounding_assertions(case: EvalCase, runs: list[AgentRun]) -> list[Assertio
         explicit = spec.get("values") or []
         matched = [t for t in all_calls if t.name == tool]
         if explicit:
-            pairs = [(str(v)[:60], _norm_value(v)) for v in explicit]
+            # 与 _evidence_pairs / output_grounded_in 共用去重口径：
+            # 重复值（含归一化后同值）不能凑满 min_values
+            pairs = _dedup_pairs([(str(v)[:60], _norm_value(v)) for v in explicit])
         else:
             pairs = []
             for t in matched:
                 if t.result is not None:
                     pairs += _evidence_pairs(t.result)
+            pairs = _dedup_pairs(pairs)
         if not matched:
             results.append(AssertionResult(
                 "tool_result_used", False,
@@ -263,13 +302,8 @@ def _grounding_assertions(case: EvalCase, runs: list[AgentRun]) -> list[Assertio
                         pairs += _evidence_pairs(t.result)
             if "retrieved" in sources:
                 pairs += [(str(x)[:60], _norm_value(x)) for x in all_retrieved]
-        # 去重
-        uniq: list[tuple[str, str]] = []
-        seen: set[str] = set()
-        for raw, n in pairs:
-            if n and n not in seen:
-                seen.add(n)
-                uniq.append((raw, n))
+        # 与 tool_result_used / _evidence_pairs 共用同一去重实现
+        uniq = _dedup_pairs(pairs)
         if not uniq:
             results.append(AssertionResult(
                 "output_grounded_in", True,
@@ -362,7 +396,8 @@ def assert_case(case: EvalCase, runs: AgentRun | list[AgentRun]) -> list[Asserti
                                 AttributionLayer.SYSTEM)]
     results.append(AssertionResult("no_error", True, ""))
 
-    final_run = runs[-1]
+    # 空轨迹防御：即使将来在 early-return 之前插入新分支也不会裸索引
+    final_run = runs[-1] if runs else AgentRun(query="", final_output="")
     results.extend(_tool_assertions(case.must_call, case.must_not_call,
                                     [call for run in runs for call in run.tool_calls]))
 
@@ -423,11 +458,43 @@ class CaseOutcome:
     pass_runs: int = 1          # repeat>1 时：通过次数（pass^k 口径 = 全过才算过）
     total_runs: int = 1
     runs: Optional[list[AgentRun]] = None   # 多轮对话时：每一轮的 AgentRun（单轮为 None）
+    session_id: str = ""        # 实际生效的会话标识（快照按会话归并回放）
 
     @property
     def flaky(self) -> bool:
         """有通过有失败 —— 非确定性信号，进报告单独列示。"""
         return 0 < self.pass_runs < self.total_runs
+
+    @property
+    def unverified(self) -> list[AssertionResult]:
+        """声明了但没验成：skipped / need_review 的断言。"""
+        return [a for a in self.assertions
+                if a.result_status() in ("skipped", "need_review")]
+
+    @property
+    def effective(self) -> list[AssertionResult]:
+        """真正参与判定的断言。no_error 是结构性占位（Agent 跑通），不算判分依据。"""
+        return [a for a in self.assertions
+                if a.result_status() in ("passed", "failed")
+                and a.kind != "no_error"]
+
+    @property
+    def undetermined(self) -> bool:
+        """没有任何有效断言、且存在被跳过的断言 —— 这条用例其实没测过。"""
+        return (not any(a.result_status() == "failed" for a in self.assertions)
+                and bool(self.unverified) and not self.effective)
+
+    @property
+    def case_status(self) -> str:
+        """三态判定：passed / failed / undetermined。
+
+        - 任一断言 failed → failed（与 passed 原义一致）
+        - 有 skipped/need_review 但无任何有效断言 → undetermined（不计入通过率）
+        - 有 skipped/need_review 但存在有效断言 → 按有效断言判（仅标注不阻断）
+        """
+        if any(a.result_status() == "failed" for a in self.assertions):
+            return "failed"
+        return "undetermined" if self.undetermined else "passed"
 
     def failed_details(self) -> list[str]:
         details = [f"[{a.kind}] {a.detail}" for a in self.assertions if not a.ok]
@@ -451,12 +518,26 @@ class EvalReport:
         return len(self.outcomes)
 
     @property
+    def determined_total(self) -> int:
+        """有效判定过的用例数（排除 undetermined）—— 通过率的分母。"""
+        return sum(1 for o in self.outcomes if o.case_status != "undetermined")
+
+    @property
+    def undetermined_total(self) -> int:
+        """未有效测试的用例数（全 skipped / need_review / 无有效断言）。"""
+        return sum(1 for o in self.outcomes if o.case_status == "undetermined")
+
+    def undetermined_cases(self) -> list[CaseOutcome]:
+        return [o for o in self.outcomes if o.case_status == "undetermined"]
+
+    @property
     def passed(self) -> int:
-        return sum(1 for o in self.outcomes if o.passed)
+        return sum(1 for o in self.outcomes if o.case_status == "passed")
 
     @property
     def success_rate(self) -> float:
-        return self.passed / self.total if self.total else 0.0
+        # 分母用有效判定数：未测过的用例不能算进成功率，也不能稀释分母
+        return self.passed / self.determined_total if self.determined_total else 0.0
 
     def fingerprint(self) -> dict:
         """运行指纹：回答「这两份报告能不能放在一起比」。
@@ -464,6 +545,8 @@ class EvalReport:
         文章踩坑 1：生产与预发共用应用标识 → 评估任务混入不同环境的 Trace，
         结果不可比较。指纹把环境 / 数据集 / 层级 / 版本四要素固化下来。
         """
+        # vs 来自 versions_summary（已遍历全部轮次），因此末轮 model/prompt
+        # 版本变化会改变 config_sig —— 换版本的两份报告不再被误判为可比。
         vs = self.versions_summary()
         sig = hashlib.sha256(json.dumps(
             {"env": self.env, "dataset": self.dataset, "level": self.level,
@@ -477,12 +560,18 @@ class EvalReport:
         }
 
     def perf_summary(self) -> dict:
-        """延迟 / Token 汇总。实验对比时「改好了但慢了、贵了」必须看得见。"""
-        latencies = [o.run.latency_ms for o in self.outcomes
-                     if o.run and isinstance(o.run.latency_ms, (int, float))]
+        """延迟 / Token 汇总。实验对比时「改好了但慢了、贵了」必须看得见。
+
+        一律取末轮，与 report_to_dict 的逐题性能口径一致（o.run 是首轮代表性轨迹，
+        多轮场景下会与逐题字段自相矛盾）。
+        """
+        latencies = []
         tokens = []
         for o in self.outcomes:
-            u = (o.run.token_usage if o.run else None) or {}
+            last = _last_run_of(o)
+            if last and isinstance(last.latency_ms, (int, float)):
+                latencies.append(last.latency_ms)
+            u = (last.token_usage if last else None) or {}
             if isinstance(u, dict) and u:
                 t = u.get("total")
                 if not isinstance(t, (int, float)):
@@ -501,6 +590,11 @@ class EvalReport:
     def blockers_failed(self) -> list[CaseOutcome]:
         return [o for o in self.outcomes if not o.passed and o.case.severity == "blocker"]
 
+    def blockers_undetermined(self) -> list[CaseOutcome]:
+        """blocker 未有效测试 —— 门禁必须拒绝，不能当作绿灯。"""
+        return [o for o in self.outcomes
+                if o.case_status == "undetermined" and o.case.severity == "blocker"]
+
     def flaky_cases(self) -> list[CaseOutcome]:
         return [o for o in self.outcomes if o.flaky]
 
@@ -515,8 +609,8 @@ class EvalReport:
                 if s == "skipped":
                     stats["skipped"] += 1
                 elif s == "need_review":
+                    # 弃判不是实判：不能计入 judged，否则校准/覆盖率会虚高
                     stats["need_review"] += 1
-                    stats["judged"] += 1
                 elif s == "failed":
                     stats["failed"] += 1
                     stats["judged"] += 1
@@ -531,19 +625,27 @@ class EvalReport:
                        for a in o.assertions)]
 
     def versions_summary(self) -> dict:
-        """版本四要素汇总（取最后一次记录到的值），供报告留档与版本对比。"""
+        """版本四要素汇总，供报告留档与版本对比。
+
+        遍历全部轮次（多轮用例的末轮版本才代表本次生效配置），按轮次顺序覆盖；
+        否则 config_sig 不含版本，换模型版本的两份报告会被误判为可比。
+        """
         summary: dict = {}
         for o in self.outcomes:
-            if o.run and o.run.versions:
-                summary.update(o.run.versions)
+            for r in _runs_of(o):
+                if r.versions:
+                    summary.update(_safe_value(r.versions))
         return summary
 
     def text(self) -> str:
         lines = [
             f"级别: {self.level} ｜ 用例: {self.total} ｜ 通过: {self.passed} ｜ "
-            f"成功率: {self.success_rate:.1%}"
+            f"成功率: {self.success_rate:.1%}（有效判定 {self.determined_total} 条）"
             + (f" ｜ 每条复跑 {self.repeat} 次" if self.repeat > 1 else "")
         ]
+        if self.undetermined_total:
+            lines.append(f"⚠ 未定 {self.undetermined_total} 条（未有效测试，不参与通过率）: "
+                         f"{[o.case.case_id for o in self.undetermined_cases()]}")
         fp = self.fingerprint()
         lines.append(f"运行指纹: run_id={fp['run_id'] or '未分配'} ｜ env={fp['env']} "
                      f"｜ dataset={fp['dataset']} ｜ config={fp['config_sig']}")
@@ -599,13 +701,21 @@ class BatchRunner:
     def run_case(self, case: EvalCase, context: dict | None = None,
                  level: str = "L0") -> CaseOutcome:
         merged = {**(context or {}), **case.context_overrides}
+        # 实际生效的会话标识写回 context 并留档：run_turns 自动生成后不再无人知晓，
+        # 快照也因此能按真实会话归并回放（旧实现只读 context_overrides，恒为空）。
+        effective_sid = merged.get("session_id") or f"eval-{uuid.uuid4().hex[:12]}"
+        merged = {**merged, "session_id": effective_sid}
         all_runs: list[AgentRun]
-        if case.turns:
-            # 多轮：case.query 是第 1 轮，case.turns 是第 2 轮起的后续轮次
-            turn_specs = [{"query": case.query}, *case.turns]
-            all_runs = self.adapter.run_turns(turn_specs, merged)
-        else:
-            all_runs = [self.adapter.run(case.query, merged)]
+        try:
+            if case.turns:
+                # 多轮：case.query 是第 1 轮，case.turns 是第 2 轮起的后续轮次
+                turn_specs = [{"query": case.query}, *case.turns]
+                all_runs = self.adapter.run_turns(turn_specs, merged)
+            else:
+                all_runs = [self.adapter.run(case.query, merged)]
+        except Exception as e:  # noqa: BLE001 - 一条坏用例不能毁掉整批
+            all_runs = [AgentRun(query=case.query, final_output="",
+                                 error=f"adapter 异常: {e!r}")]
         results = assert_case(case, all_runs)
         if len(all_runs) >= 1 + len(case.turns):
             results += self._semantic_assertions(case, all_runs, level)
@@ -631,7 +741,8 @@ class BatchRunner:
             first_error = FirstErrorFinder(steps).find()
         return CaseOutcome(case, all_runs[0] if all_runs else None,
                            results, passed, first_error, attribution,
-                           runs=(all_runs if len(all_runs) > 1 else None))
+                           runs=(all_runs if len(all_runs) > 1 else None),
+                           session_id=effective_sid)
 
     def _semantic_assertions(self, case: EvalCase,
                              runs: list[AgentRun], level: str) -> list[AssertionResult]:
@@ -652,15 +763,25 @@ class BatchRunner:
                                     f"{len(case.judge_criteria)} 条标准未判",
                                     AttributionLayer.COMPONENT, skipped=True,
                                     status="skipped")]
-        final_output = runs[-1].final_output
+        final_output = runs[-1].final_output if runs else ""
         trace = _merged_trace(runs)
-        if _judge_accepts_trace(self.judge):
-            r = self.judge.judge(case.query, case.judge_criteria, final_output,
-                                 trace=trace)
-        else:
-            r = self.judge.judge(case.query, case.judge_criteria, final_output)
-        verdict = r.get("verdict", "need_review")
-        evidence = r.get("evidence", [])
+        try:
+            if _judge_accepts_trace(self.judge):
+                try:
+                    r = self.judge.judge(case.query, case.judge_criteria,
+                                         final_output, trace=trace)
+                except TypeError:
+                    # 双保险：能力探测误判时回退三参调用，不让整批中断
+                    r = self.judge.judge(case.query, case.judge_criteria,
+                                         final_output)
+            else:
+                r = self.judge.judge(case.query, case.judge_criteria, final_output)
+        except Exception as e:  # noqa: BLE001 - 判分器故障不能毁整批
+            r = {"verdict": "need_review",
+                 "evidence": [f"judge 调用异常降级: {e!r}"]}
+        r = _normalize_verdict(r)
+        verdict = r["verdict"]
+        evidence = r["evidence"]
         if verdict == "pass":
             return [AssertionResult("semantic", True, "", AttributionLayer.COMPONENT,
                                     status="passed")]
@@ -685,6 +806,7 @@ class BatchRunner:
             first_error=base.first_error, attribution=base.attribution,
             pass_runs=pass_runs, total_runs=repeat,
             runs=base.runs,          # 多轮轨迹必须透传，否则快照只剩第 1 轮
+            session_id=base.session_id,
         )
 
     def run_all(self, cases: list[EvalCase], level: str = "L0",
@@ -700,22 +822,40 @@ class BatchRunner:
         """
         if repeat < 1 or max_workers < 1:
             raise ValueError("repeat 与 max_workers 必须 ≥ 1")
+        # 空跑批无条件拒绝：dataset 过滤分支之外也要挡住（空报告会让门禁误放行）
+        if not cases:
+            raise ValueError("空跑批（0 条用例），拒绝生成空报告")
         if dataset is not None:
-            wanted = {dataset} if isinstance(dataset, str) else set(dataset)
+            if isinstance(dataset, str):
+                wanted = {dataset}
+            elif isinstance(dataset, (list, tuple, set)) and all(
+                    isinstance(x, str) and x.strip() for x in dataset):
+                wanted = set(dataset)
+            else:
+                raise ValueError("dataset 应为字符串或字符串数组"
+                                 f"（实际 {type(dataset).__name__}）")
             cases = [c for c in cases if c.dataset in wanted]
             if not cases:
                 raise ValueError(f"dataset={sorted(wanted)} 过滤后没有用例，拒绝空跑批"
                                  "（空报告会让门禁误放行）")
         if repeat == 1 and max_workers == 1:
-            outcomes = [self.run_case(c, context, level=level) for c in cases]
+            outcomes = []
+            for c in cases:
+                try:
+                    outcomes.append(self.run_case(c, context, level=level))
+                except Exception as e:  # noqa: BLE001 - 一条坏用例不毁整批
+                    outcomes.append(_failed_outcome(c, f"框架执行异常: {e!r}"))
         else:
             from concurrent.futures import ThreadPoolExecutor
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 futures = [(i, pool.submit(self._run_repeats, c, repeat, context, level))
                            for i, c in enumerate(cases)]
-                outcomes: list[Optional[CaseOutcome]] = [None] * len(cases)
+                outcomes: list[CaseOutcome] = [None] * len(cases)  # type: ignore[list-item]
                 for i, fut in futures:
-                    outcomes[i] = fut.result()
+                    try:
+                        outcomes[i] = fut.result()
+                    except Exception as e:  # noqa: BLE001
+                        outcomes[i] = _failed_outcome(cases[i], f"框架执行异常: {e!r}")
         ds_label = (dataset if isinstance(dataset, str)
                     else ",".join(sorted(dataset)) if dataset else "")
         return EvalReport(
@@ -729,13 +869,29 @@ class BatchRunner:
 
 # ---------- 门禁判定（baseline 由调用方传入） ----------
 
+def _failed_outcome(case: EvalCase, message: str) -> CaseOutcome:
+    """用例级异常兜底：转成 no_error 失败，一条坏用例不毁整批。"""
+    run = AgentRun(query=case.query, final_output="", error=message)
+    results = assert_case(case, [run])
+    return CaseOutcome(case, run, results, False, None, None, session_id="")
+
+
 def gate_decision(report: EvalReport, baseline_rate: Optional[float] = None,
                   drop_pp: float = 2.0) -> tuple[bool, list[str]]:
     """返回 (是否放行, 触发的规则列表)。blocker 一票否决，不参与百分比稀释。
 
-    P2 语义断言失败的 blocker 用例同样一票否决（语义失败已在 passed 里，无需特判）。
+    纵深防御：空报告、全部用例未有效测试（undetermined）、blocker 未测，
+    都不能当作绿灯放行。其余 undetermined 只标注、不阻断。
     """
+    if report.total == 0:
+        return False, ["空报告（0 条用例），拒绝放行"]
+    if report.determined_total == 0:
+        return False, ["全部用例未有效测试（undetermined），拒绝放行"]
     reasons: list[str] = []
+    undetermined_blockers = report.blockers_undetermined()
+    if undetermined_blockers:
+        reasons.append(f"blocker 未有效测试 {len(undetermined_blockers)} 条: "
+                       f"{[o.case.case_id for o in undetermined_blockers]}")
     blocked = report.blockers_failed()
     if blocked:
         reasons.append(f"blocker 样本失败 {len(blocked)} 条: "
@@ -756,10 +912,16 @@ def _runs_of(outcome: CaseOutcome) -> list[AgentRun]:
     return [outcome.run] if outcome.run else []
 
 
+def _last_run_of(outcome: CaseOutcome) -> Optional[AgentRun]:
+    """版本 / 性能 / 报告 / 快照统一取末轮，避免首轮与逐题字段自相矛盾。"""
+    runs = _runs_of(outcome)
+    return runs[-1] if runs else None
+
+
 def _snapshot_call(t: ToolCallRecord) -> dict:
     """快照里的工具调用：默认只写 name/args（与旧格式完全兼容），
     有返回值或调用失败时才补 result / ok 字段。"""
-    d = {"name": t.name, "args": t.args}
+    d = {"name": t.name, "args": _safe_value(t.args)}
     if t.result is not None:
         d["result"] = _safe_value(t.result)
     if not t.ok:
@@ -776,8 +938,7 @@ def report_to_dict(report: EvalReport, gate_ok: bool | None = None,
     """
     cases = []
     for o in report.outcomes:
-        turns = _runs_of(o)
-        last = turns[-1] if turns else None
+        last = _last_run_of(o)
         cases.append({
             "id": o.case.case_id,
             "case_hash": hashlib.sha256(json.dumps(
@@ -789,6 +950,7 @@ def report_to_dict(report: EvalReport, gate_ok: bool | None = None,
             "route": o.case.route,
             "owner": o.case.owner,
             "passed": o.passed,
+            "case_status": o.case_status,
             "pass_runs": o.pass_runs,
             "total_runs": o.total_runs,
             "flaky": o.flaky,
@@ -817,7 +979,13 @@ def report_to_dict(report: EvalReport, gate_ok: bool | None = None,
         "total": report.total,
         "passed": report.passed,
         "success_rate": report.success_rate,
+        "determined_total": report.determined_total,
+        "undetermined": report.undetermined_total,
+        "undetermined_total": report.undetermined_total,
+        "undetermined_cases": [o.case.case_id for o in report.undetermined_cases()],
         "blockers_failed": [o.case.case_id for o in report.blockers_failed()],
+        "blockers_undetermined": [o.case.case_id
+                                  for o in report.blockers_undetermined()],
         "versions": report.versions_summary(),
         "fingerprint": report.fingerprint(),
         "perf": report.perf_summary(),
@@ -993,24 +1161,32 @@ def write_snapshots(path: str | Path, report: EvalReport) -> int:
                 "severity": o.case.severity,
                 "case_dataset": o.case.dataset,
                 "turn": f"{i + 1}/{len(turns)}",
-                "session_id": (o.case.context_overrides or {}).get("session_id", ""),
+                # 取实际生效的会话标识（run_case 写回），不再只读 context_overrides
+                "session_id": o.session_id,
                 "query": r.query,
                 "tool_calls": [_snapshot_call(t) for t in r.tool_calls],
-                "retrieved": r.retrieved,
+                # 动态字段统一收敛：datetime / set / 自定义对象 / 非法 dict key
+                # 不再让裸 json.dumps 抛 TypeError 并留下半批残文件。
+                # query / final_output / error 保留原值（字符串），避免截断回放证据。
+                "retrieved": [str(x) for x in (r.retrieved or [])],
                 "final_output": r.final_output,
-                "state": r.state,
-                "versions": r.versions,
+                "state": _safe_value(r.state),
+                "versions": _safe_value(r.versions),
                 "latency_ms": r.latency_ms,
-                "token_usage": r.token_usage,
+                "token_usage": _safe_value(r.token_usage),
                 "error": r.error,
                 "passed": o.passed,
+                "case_status": o.case_status,
                 "semantic": semantic if i == len(turns) - 1 else [],
             })
+    # 先在内存把全部记录序列化成功，再一次追加写入：任一条失败都不会留下
+    # 半批残文件（快照是回放的确定性来源）。default=str 作为最后兜底。
+    payload = "".join(json.dumps(rec, ensure_ascii=False, default=str) + "\n"
+                      for rec in records)
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     with p.open("a", encoding="utf-8") as f:
-        for rec in records:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        f.write(payload)
     return len(records)
 
 
@@ -1074,7 +1250,14 @@ def compare_reports(old: dict, new: dict) -> dict:
     removed_cases = sorted(old_map.keys() - new_map.keys())
     changed_cases = [cid for cid in common
                      if old_map[cid].get("case_hash") != new_map[cid].get("case_hash")]
-    evalset_mismatch = bool(added_cases or removed_cases or changed_cases)
+    # 旧格式报告可能两侧都没有 case_hash：None != None 为 False，会绕过
+    # 「用例定义变化」检查，把不可比的两份报告判成可比（误放行）。
+    # 只处理「两侧都缺」；一侧有一侧没有由 changed_cases（hash 不等）覆盖。
+    missing_fingerprints = bool(common) and all(
+        not old_map[cid].get("case_hash") and not new_map[cid].get("case_hash")
+        for cid in common)
+    evalset_mismatch = bool(added_cases or removed_cases or changed_cases
+                            or missing_fingerprints)
 
     newly_failing = [cid for cid in common
                      if old_map[cid].get("passed") and not new_map[cid].get("passed")]
@@ -1111,7 +1294,9 @@ def compare_reports(old: dict, new: dict) -> dict:
         # 环境不一致时任何差值都不可信，优先于其他所有判定
         verdict = f"invalid｜环境不一致（{old_env} → {new_env}），两份报告不可比较"
     elif evalset_mismatch:
-        verdict = "invalid｜评估集不一致（用例新增、移除、定义变化或缺少对应指纹），通过率不可比较"
+        why = "缺少用例定义指纹，无法确认两份报告用的是同一套评估集" if missing_fingerprints \
+            else "用例新增、移除或定义变化"
+        verdict = f"invalid｜评估集不一致（{why}），通过率不可比较"
     elif abs(delta) <= rr.NOISE_BAND:
         verdict = "invalid｜噪声带内，无法归因，本次作废（复跑或加样本）"
     elif delta >= rr.PROMOTE_GAIN:
@@ -1135,6 +1320,7 @@ def compare_reports(old: dict, new: dict) -> dict:
         "removed_cases": removed_cases,
         "changed_cases": changed_cases,
         "evalset_mismatch": evalset_mismatch,
+        "missing_fingerprints": missing_fingerprints,
         "case_diffs": case_diffs,
         "perf_delta": perf_delta,
         "env_mismatch": env_mismatch,

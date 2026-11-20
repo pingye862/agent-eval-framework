@@ -31,7 +31,8 @@ HERE = os.path.dirname(__file__)
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--evalset", default=os.path.join(HERE, "evalset.json"))
-    ap.add_argument("--gate", action="store_true", help="门禁模式：失败 exit 1")
+    ap.add_argument("--gate", action="store_true",
+                    help="显式门禁模式：打印放行依据（退出码始终由门禁判定决定，0 放行 / 1 拦截）")
     ap.add_argument("--fixed", action="store_true", help="演示用：修复全部缺陷")
     ap.add_argument("--baseline", type=float, default=None,
                     help="历史基线成功率（0~1），用于下降判定")
@@ -99,6 +100,8 @@ def main() -> int:
             print(f"\n（未找到 {spec}，跳过覆盖账本）")
 
     ok, reasons = gate_decision(report, baseline_rate=args.baseline)
+    if args.gate:
+        print("\n[门禁模式] 下方判定直接决定进程退出码：0 放行 / 1 拦截")
     print("\n门禁判定:", "✅ 放行合并" if ok else "⛔ 拦截合并")
     for r in reasons:
         print(f"  - {r}")
