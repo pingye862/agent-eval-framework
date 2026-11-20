@@ -25,7 +25,7 @@
 ## 目录结构
 
 ```
-agent_eval/               评测框架（核心模块 + 9 组单测 + demo 示例项目）
+agent_eval/               评测框架（核心模块 + 单测 + demo 示例 + 通用案例库）
 webui/                    评测控制台（python3 webui/server.py 启动，默认 8900 端口）
 docs/                     小白上手指南（getting-started-zh.md，10 分钟跑通第一份报告）
 ```
@@ -51,9 +51,39 @@ python3 run_eval.py
 cd webui && python3 server.py   # http://127.0.0.1:8900
 # 控制台里可选 L0/L1/L2 层级；「生成覆盖审计报告」读 webui/coverage_spec.json
 # （仓库自带一份示例），产出 coverage.html
+
+# 3. 跑通用案例库（与业务无关的 10 个能力维度，零依赖参考实现，应全绿）
+cd agent_eval/examples/universal_cases && python3 run_eval.py -v
 ```
 
 单测：`python3 -m pytest agent_eval/tests/ -q`（230 条，含 Web 控制台 API、数据飞轮闭环与门禁可靠性回归；数字以 `--collect-only` 为准）
+
+## 通用案例库：一套用例跑任何系统
+
+`agent_eval/examples/universal_cases/` 是**与业务无关**的评测资产，覆盖任何 Agent 都该
+具备的 10 个能力维度：存活性与指令遵循、工具选择、结果采用、危险操作禁令、写副作用、
+证据接地、多轮记忆、轮次级断言、错误韧性、语义质量。自带零依赖参考实现，clone 即跑：
+
+```bash
+cd agent_eval/examples/universal_cases
+python3 run_eval.py -v              # 11 条全量，逐条看结果（实测 11/11，100%，门禁放行）
+python3 run_eval.py --dataset smoke # 3 条冒烟
+python3 run_eval.py --demo-undetermined   # 看 undetermined 如何拦住「没测过的绿灯」
+python3 -m pytest test_universal_cases.py -q   # 案例库自检 7 项
+```
+
+断言天生和业务绑定，所以「通用」靠三个约定做出来，而非魔法：
+
+| 约定 | 内容 | 换来什么 |
+|---|---|---|
+| **标准动作** | `lookup` 读 / `compute` 算 / `record` 写 / `destroy` 删 / `deliver` 外发 | 只问「该不该做这类事」，任何业务工具都能归到这 5 类 |
+| **回显令牌** | 通用 query 要求原样回显 `ECHO-42` | 「回答必须含 X」与业务解耦；过不了就是指令遵循有缺口 |
+| **状态路径** | `state["audit_log"]` 记副作用、`state["memory"]` 存会话记忆 | 写操作与多轮记忆可观测，不绑定具体存储结构 |
+
+接自己的系统有两条路，选一条：**改 adapter**（把真实工具名归一成标准动作，改一处）或
+**改配置**（`render.py` + `profile.json` 把案例里的标准名/夹具值换成你的真实值）。
+细节与「别当银弹」的边界说明见
+[universal_cases/README.md](agent_eval/examples/universal_cases/README.md)。
 
 ## 数据飞轮最小闭环：Bad Case → 回归资产
 

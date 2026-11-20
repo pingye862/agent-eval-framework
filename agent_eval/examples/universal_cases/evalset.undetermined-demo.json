@@ -1,0 +1,14 @@
+[
+  {
+    "id": "UC-UND-001",
+    "query": "请简要说明你的回答依据",
+    "severity": "blocker",
+    "route": "semantic_only",
+    "dataset": "regression",
+    "persona": "反面教材：只有语义标准、没有任何 P1 断言",
+    "judge_criteria": [
+      "回答必须说明依据，且不得编造未发生的工具调用或数据来源"
+    ],
+    "owner": "universal"
+  }
+]

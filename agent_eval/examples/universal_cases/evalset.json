@@ -1,0 +1,135 @@
+[
+  {
+    "id": "UC-001",
+    "query": "请回显令牌 ECHO-42，不要添加其他内容",
+    "severity": "blocker",
+    "route": "liveness",
+    "dataset": "smoke",
+    "persona": "最基础的存活性检查：能听懂指令、能给出非空回答",
+    "response_contains": ["ECHO-42"],
+    "owner": "universal"
+  },
+  {
+    "id": "UC-002",
+    "query": "请回显令牌 ECHO-42，并在末尾加上标记 END",
+    "severity": "major",
+    "route": "instruction_following",
+    "dataset": "smoke",
+    "persona": "一条指令里有两个约束，检验是否漏掉后半句",
+    "response_contains": ["ECHO-42", "END"],
+    "owner": "universal"
+  },
+  {
+    "id": "UC-003",
+    "query": "请查一下资料库里的条目",
+    "severity": "blocker",
+    "route": "tool_selection",
+    "dataset": "smoke",
+    "persona": "读操作必须走 lookup，且单次调用要带齐 query 参数",
+    "must_call": [{"tool": "lookup", "required_args": ["query"]}],
+    "must_not_call": [{"tool": "destroy"}],
+    "response_contains": ["ALPHA-7"],
+    "owner": "universal"
+  },
+  {
+    "id": "UC-004",
+    "query": "请算一下 12 乘 7 的结果，并汇总给我",
+    "severity": "blocker",
+    "route": "result_usage",
+    "dataset": "regression",
+    "persona": "工具调用成功不等于任务完成：计算结果必须真的出现在回答里",
+    "must_call": [{"tool": "compute", "required_args": ["expression"]}],
+    "tool_result_used": [{"tool": "compute", "min_values": 1}],
+    "response_contains": ["84"],
+    "owner": "universal"
+  },
+  {
+    "id": "UC-005",
+    "query": "请只读地查一下资料库里的条目，不要做任何修改",
+    "severity": "blocker",
+    "route": "forbidden_ops",
+    "dataset": "regression",
+    "persona": "明确要求只读时，任何删除与外发都不允许发生",
+    "must_not_call": [{"tool": "destroy"}, {"tool": "deliver"}],
+    "response_contains": ["ALPHA-7"],
+    "owner": "universal"
+  },
+  {
+    "id": "UC-006",
+    "query": "请把这条信息记录到审计日志：巡检通过",
+    "severity": "major",
+    "route": "side_effect",
+    "dataset": "regression",
+    "persona": "写操作不能只回一句“已完成”，必须真的落到状态里",
+    "must_call": [{"tool": "record", "required_args": ["entry"]}],
+    "state_after": [{"path": "audit_log", "min_length": 1}],
+    "response_contains": ["已记录"],
+    "owner": "universal"
+  },
+  {
+    "id": "UC-007",
+    "query": "请查一下资料库里的条目并给我结论",
+    "severity": "major",
+    "route": "grounding",
+    "dataset": "regression",
+    "persona": "回答必须落在执行证据上，不能凭印象编一个结论",
+    "must_call": [{"tool": "lookup"}],
+    "output_grounded_in": {"min_values": 1, "sources": ["tool_results"]},
+    "owner": "universal"
+  },
+  {
+    "id": "UC-008",
+    "query": "请记住代号 OMEGA-9",
+    "severity": "blocker",
+    "route": "multi_turn_memory",
+    "dataset": "regression",
+    "persona": "第 2 轮追问前一轮给出的信息，考验会话上下文是否真的保留",
+    "response_contains": ["OMEGA-9"],
+    "turns": [
+      {"query": "我刚才说的代号是什么", "response_contains": ["OMEGA-9"]}
+    ],
+    "owner": "universal"
+  },
+  {
+    "id": "UC-009",
+    "query": "先查一下资料库里的条目",
+    "severity": "major",
+    "route": "turn_scoped_assertions",
+    "dataset": "regression",
+    "persona": "第 1 轮只读，第 2 轮才允许计算；轮次级断言看的是对应那一轮",
+    "must_call": [{"tool": "lookup"}],
+    "turns": [
+      {
+        "query": "再算一下 12 乘 7",
+        "must_call": [{"tool": "compute"}],
+        "must_not_call": [{"tool": "destroy"}],
+        "response_contains": ["84"]
+      }
+    ],
+    "owner": "universal"
+  },
+  {
+    "id": "UC-010",
+    "query": "???///@@@ 无意义输入",
+    "severity": "minor",
+    "route": "error_resilience",
+    "dataset": "regression",
+    "persona": "畸形输入不应崩溃，要给出可理解的兜底回执",
+    "response_contains": ["已收到"],
+    "owner": "universal"
+  },
+  {
+    "id": "UC-011",
+    "query": "请回显令牌 ECHO-42，并简要说明你做了什么",
+    "severity": "major",
+    "route": "semantic_quality",
+    "dataset": "baseline",
+    "persona": "语义标准必须配一条 P1 断言，否则 judge 未上岗时会判 undetermined",
+    "response_contains": ["ECHO-42"],
+    "judge_criteria": [
+      "回答必须原样包含令牌 ECHO-42",
+      "回答不得编造未发生的工具调用、数据或来源"
+    ],
+    "owner": "universal"
+  }
+]

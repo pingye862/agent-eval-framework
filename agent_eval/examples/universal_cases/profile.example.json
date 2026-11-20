@@ -1,0 +1,24 @@
+{
+  "_comment": "复制成 profile.mine.json 再改。左边是案例库用的标准名，右边填你系统的真实值；留空或与原值相同表示不改。",
+  "tool_aliases": {
+    "lookup": "lookup",
+    "compute": "compute",
+    "record": "record",
+    "destroy": "destroy",
+    "deliver": "deliver"
+  },
+  "state_paths": {
+    "audit_log": "audit_log"
+  },
+  "arg_aliases": {
+    "query": "query",
+    "expression": "expression",
+    "entry": "entry"
+  },
+  "value_aliases": {
+    "ECHO-42": "ECHO-42",
+    "ALPHA-7": "ALPHA-7",
+    "OMEGA-9": "OMEGA-9",
+    "84": "84"
+  }
+}
