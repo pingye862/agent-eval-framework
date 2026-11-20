@@ -4,6 +4,7 @@
     "query": "iPhone 15 现在多少钱",
     "severity": "blocker",
     "route": "price_query",
+    "dataset": "smoke",
     "persona": "比价用户，只关心价格",
     "must_call": [{"tool": "query_price", "required_args": ["model"]}],
     "must_not_call": [{"tool": "query_product"}],
@@ -16,6 +17,7 @@
     "query": "iPhone 15 Pro 多少钱",
     "severity": "blocker",
     "route": "price_query",
+    "dataset": "smoke",
     "persona": "高端机型比价",
     "must_call": [{"tool": "query_price", "required_args": ["model"]}],
     "must_not_call": [{"tool": "query_product"}],
@@ -28,6 +30,7 @@
     "query": "iPhone 15 的屏幕尺寸是多少",
     "severity": "major",
     "route": "product_consult",
+    "dataset": "regression",
     "must_call": [{"tool": "query_product", "required_args": ["model", "field"]}],
     "response_contains": ["6.1"],
     "owner": "demo"
@@ -37,6 +40,7 @@
     "query": "Pixel 8 的屏幕尺寸是多少",
     "severity": "major",
     "route": "product_consult",
+    "dataset": "regression",
     "must_call": [{"tool": "query_product", "required_args": ["model"]}],
     "response_contains": ["6.2"],
     "owner": "demo"
@@ -46,6 +50,7 @@
     "query": "iPhone 15 现在多少钱",
     "severity": "blocker",
     "route": "price_query",
+    "dataset": "baseline",
     "persona": "VIP 用户，查价后需发送优惠通知",
     "must_call": [{"tool": "query_price"}, {"tool": "notify"}],
     "response_contains": ["5999"],
@@ -58,6 +63,7 @@
     "query": "这款手机的电池容量多大",
     "severity": "blocker",
     "route": "unanswerable",
+    "dataset": "baseline",
     "persona": "模糊提问，无机型上下文",
     "must_not_call": [{"tool": "query_price"}],
     "response_contains": ["人工"],
@@ -72,6 +78,7 @@
     "query": "iPhone 15 Pro 的芯片是什么",
     "severity": "minor",
     "route": "product_consult",
+    "dataset": "regression",
     "must_call": [{"tool": "query_product"}],
     "judge_criteria": ["回答中的芯片型号必须与知识库事实一致，不能编造"],
     "owner": "demo"
@@ -81,8 +88,24 @@
     "query": "Pixel 8 现在多少钱",
     "severity": "major",
     "route": "price_query",
+    "dataset": "smoke",
     "must_call": [{"tool": "query_price"}],
     "response_contains": ["4599"],
+    "owner": "demo"
+  },
+  {
+    "id": "CS-009",
+    "query": "帮我把 Pixel 8 的价格查询结果汇总一下",
+    "severity": "blocker",
+    "route": "price_query",
+    "dataset": "regression",
+    "persona": "要的是汇总结论，不是「已查询」的回执",
+    "must_call": [{"tool": "query_price"}],
+    "tool_result_used": [{"tool": "query_price", "min_values": 1}],
+    "judge_criteria": [
+      "回答必须给出工具返回的具体价格数字，不能只说「已完成查询」",
+      "结论必须与工具返回值一致，不能声称没有查到数据"
+    ],
     "owner": "demo"
   }
 ]

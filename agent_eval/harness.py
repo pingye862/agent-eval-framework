@@ -3,11 +3,15 @@
 你的项目只需要做一件事：实现 AgentAdapter，把每次调用包装成 AgentRun。
 其余的（P1 断言、批量执行、失败归因、门禁判定、报告）都由这里负责。
 
-能力覆盖：断言三类型 / 分层执行 / 合并门禁 / 链路第一错与主归因层。
+能力覆盖：断言五类型 / 分层执行 / 失败样本回流 / 合并门禁 /
+链路第一错与主归因层 / 数据集分层 / 运行指纹 / 版本逐题对比。
 """
 from __future__ import annotations
 
+import hashlib
+import inspect
 import json
+import os
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -16,7 +20,7 @@ from pathlib import Path
 from typing import Optional
 
 from attribution import FirstErrorFinder, TraceStep, single_attribution
-from evalset import EvalCase
+from evalset import EvalCase, case_to_dict, load_evalset
 from models import AttributionLayer
 
 
@@ -29,12 +33,51 @@ def _import_judge():
         return None
 
 
+def _merged_trace(runs: list[AgentRun]) -> dict:
+    """多轮执行证据合并（文章 Case B 的子任务往往发生在前几轮）。"""
+    calls: list[dict] = []
+    retrieved: list[str] = []
+    state = {}
+    for r in runs:
+        for t in r.tool_calls:
+            calls.append({"name": t.name, "args": t.args,
+                          "ok": t.ok, "result": _safe_value(t.result)})
+        retrieved.extend(r.retrieved or [])
+        if r.state:
+            state = _safe_value(r.state)
+    trace = {"tool_calls": calls, "retrieved": retrieved, "state": state}
+    if len(runs) > 1:
+        trace["turns"] = [{"query": r.query, "final_output": r.final_output} for r in runs]
+    return trace
+
+
+def _judge_accepts_trace(judge) -> bool:
+    """能力探测：第三方自定义 judge 可能仍是 3 参数签名，不能强行传第 4 个。"""
+    try:
+        sig = inspect.signature(judge.judge)
+    except (TypeError, ValueError):
+        return False
+    params = list(sig.parameters.values())
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params):
+        return True
+    if "trace" in sig.parameters:
+        return True
+    positional = [p for p in params if p.kind in
+                  (inspect.Parameter.POSITIONAL_ONLY,
+                   inspect.Parameter.POSITIONAL_OR_KEYWORD)]
+    return len(positional) >= 4
+
+
 # ---------- 你的 Agent 要返回的东西 ----------
 
 @dataclass
 class ToolCallRecord:
     name: str
     args: dict = field(default_factory=dict)
+    result: object = None     # 工具返回值（可选）：从 trace 里拿到就填，
+                              # 证据接地断言与 judge 判分都靠它。调用与返回值天然对齐，
+                              # 不用维护「调用列表 / 结果列表」两套下标。
+    ok: bool = True           # 工具调用是否成功（可选）
 
 
 @dataclass
@@ -47,6 +90,40 @@ class AgentRun:
     state: dict = field(default_factory=dict)               # 副作用后的系统状态
     versions: dict = field(default_factory=dict)            # model/prompt/tool_desc/kb
     error: Optional[str] = None                             # Agent 自身抛异常时填
+    latency_ms: Optional[float] = None                      # 端到端耗时（实验对比用）
+    token_usage: dict = field(default_factory=dict)         # {"prompt":n,"completion":n,"total":n}
+
+    def trace_context(self) -> dict:
+        """打包给 LLM judge 的执行证据。只含可核验事实，不含判分标准。
+
+        文章里「工具调用成功 ≠ 任务完成」的两个 Case（读文档未刷新、子任务
+        结果未回传），靠的就是把这层证据递到裁判面前。
+        """
+        calls = []
+        for t in self.tool_calls:
+            calls.append({"name": t.name, "args": t.args,
+                          "ok": t.ok, "result": _safe_value(t.result)})
+        return {
+            "tool_calls": calls,
+            "retrieved": list(self.retrieved or []),
+            "state": _safe_value(self.state),
+        }
+
+
+def _safe_value(obj, _depth: int = 0):
+    """把任意工具返回值收敛成可 JSON 序列化、且长度可控的证据片段。"""
+    if _depth > 4:
+        return "<嵌套过深，已截断>"
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        if isinstance(obj, str) and len(obj) > 400:
+            return obj[:400] + "…（已截断）"
+        return obj
+    if isinstance(obj, dict):
+        return {str(k): _safe_value(v, _depth + 1)
+                for k, v in list(obj.items())[:20]}
+    if isinstance(obj, (list, tuple)):
+        return [_safe_value(v, _depth + 1) for v in list(obj)[:20]]
+    return str(obj)[:200]
 
 
 class AgentAdapter(ABC):
@@ -72,7 +149,145 @@ class AgentAdapter(ABC):
         return runs
 
 
-# ---------- P1 断言器 ----------
+# ---------- P1 断言：证据接地（工具返回值是否真的被回答采用） ----------
+
+def _norm_value(v: object) -> str:
+    """值归一化：全角转半角 / 去千分位逗号 / 去空白 / 小写。
+
+    让 "5,999" 与 "5999 元"、"６.１" 与 "6.1" 都能互相命中。
+    只用于「证据值是否出现在回答里」的字面匹配，不做语义判断（那是 P2 的事）。
+    """
+    s = str(v)
+    s = "".join(chr(ord(c) - 0xFEE0) if 0xFF01 <= ord(c) <= 0xFF5E else c
+                for c in s)
+    s = s.replace(",", "").replace("，", "")
+    return "".join(s.split()).lower()
+
+
+def _iter_scalars(obj, _depth: int = 0):
+    """递归展开任意工具返回值，只取标量（字符串 / 数字）。"""
+    if _depth > 4 or obj is None or isinstance(obj, bool):
+        return
+    if isinstance(obj, (str, int, float)):
+        yield obj
+    elif isinstance(obj, dict):
+        for v in list(obj.values())[:30]:
+            yield from _iter_scalars(v, _depth + 1)
+    elif isinstance(obj, (list, tuple)):
+        for v in list(obj)[:30]:
+            yield from _iter_scalars(v, _depth + 1)
+
+
+def _evidence_pairs(obj) -> list[tuple[str, str]]:
+    """从返回值抽出 (原值, 归一化值) 候选，过滤太短/太长的噪音，去重。"""
+    pairs: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for v in _iter_scalars(obj):
+        raw = str(v).strip()
+        n = _norm_value(raw)
+        if len(n) < 2 or len(n) > 80 or n in seen:
+            continue
+        seen.add(n)
+        pairs.append((raw[:60], n))
+    return pairs
+
+
+def _grounding_assertions(case: EvalCase, runs: list[AgentRun]) -> list[AssertionResult]:
+    """证据接地两类断言。
+
+    tool_result_used: 指定工具的返回值必须被最终回答采用
+    output_grounded_in: 回答中至少要出现 N 个来自执行证据的值
+
+    对应文章里「工具调用成功 ≠ 任务完成」的两个 Case：
+    - 文档读取未刷新（本轮没读，凭旧上下文编结论）
+    - 子 Agent 结果未回传（工具全成功，结果没被汇总，回答却说「没数据」）
+
+    渐进接入红线：adapter 没上报任何 tool result 时一律 skipped，
+    绝不把「不可观测」误判成「Agent 做错了」。
+    """
+    if not case.tool_result_used and not case.output_grounded_in:
+        return []
+
+    results: list[AssertionResult] = []
+    all_calls = [t for r in runs for t in r.tool_calls]
+    all_retrieved = [x for r in runs for x in (r.retrieved or [])]
+    final_output = runs[-1].final_output or ""
+    norm_out = _norm_value(final_output)
+
+    for spec in case.tool_result_used:
+        tool = str(spec.get("tool") or "")
+        min_values = int(spec.get("min_values", 1))
+        explicit = spec.get("values") or []
+        matched = [t for t in all_calls if t.name == tool]
+        if explicit:
+            pairs = [(str(v)[:60], _norm_value(v)) for v in explicit]
+        else:
+            pairs = []
+            for t in matched:
+                if t.result is not None:
+                    pairs += _evidence_pairs(t.result)
+        if not matched:
+            results.append(AssertionResult(
+                "tool_result_used", False,
+                f"工具 {tool} 未被调用，无返回值可供回答采用",
+                AttributionLayer.TRAJECTORY))
+            continue
+        if not pairs:
+            results.append(AssertionResult(
+                "tool_result_used", True,
+                f"工具 {tool} 已调用但 adapter 未上报返回值，证据接地断言跳过"
+                "（在 ToolCallRecord.result 填充即可启用）",
+                AttributionLayer.TRAJECTORY, skipped=True, status="skipped"))
+            continue
+        hits = [raw for raw, n in pairs if n in norm_out]
+        ok = len(hits) >= min_values
+        results.append(AssertionResult(
+            "tool_result_used", ok,
+            "" if ok else (f"工具 {tool} 的返回值未被回答采用: "
+                           f"命中 {len(hits)}/{min_values}，候选 {[p[0] for p in pairs[:5]]}，"
+                           f"实际回答 {final_output[:60]!r}"),
+            AttributionLayer.TRAJECTORY))
+
+    spec = case.output_grounded_in
+    if spec:
+        min_values = int(spec.get("min_values", 1))
+        sources = spec.get("sources") or ["tool_results", "retrieved"]
+        explicit = spec.get("values") or []
+        pairs: list[tuple[str, str]] = []
+        if explicit:
+            pairs += [(str(v)[:60], _norm_value(v)) for v in explicit]
+        else:
+            if "tool_results" in sources:
+                for t in all_calls:
+                    if t.result is not None:
+                        pairs += _evidence_pairs(t.result)
+            if "retrieved" in sources:
+                pairs += [(str(x)[:60], _norm_value(x)) for x in all_retrieved]
+        # 去重
+        uniq: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for raw, n in pairs:
+            if n and n not in seen:
+                seen.add(n)
+                uniq.append((raw, n))
+        if not uniq:
+            results.append(AssertionResult(
+                "output_grounded_in", True,
+                "无可用执行证据（tool result / retrieved 均未上报），接地断言跳过",
+                AttributionLayer.TRAJECTORY, skipped=True, status="skipped"))
+        else:
+            hits = [raw for raw, n in uniq if n in norm_out]
+            ok = len(hits) >= min_values
+            results.append(AssertionResult(
+                "output_grounded_in", ok,
+                "" if ok else (f"回答缺乏执行证据支撑: 命中 {len(hits)}/{min_values}，"
+                               f"候选 {[p[0] for p in uniq[:5]]}，"
+                               f"实际回答 {final_output[:60]!r}"),
+                AttributionLayer.TRAJECTORY))
+    return results
+
+
+# ---------- 断言器 ----------
 
 @dataclass
 class AssertionResult:
@@ -92,18 +307,43 @@ class AssertionResult:
         return "passed" if self.ok else "failed"
 
 
-def assert_case(case: EvalCase, runs: AgentRun | list[AgentRun]) -> list[AssertionResult]:
-    """对一次（或多轮）运行执行全部 P1 断言。失败会带中文 detail，直接进报告。
+def _tool_assertions(must_call: list[dict], must_not_call: list[dict],
+                     calls: list[ToolCallRecord], prefix: str = "") -> list[AssertionResult]:
+    args_by_tool: dict[str, list[dict]] = {}
+    for call in calls:
+        args_by_tool.setdefault(call.name, []).append(call.args or {})
 
-    多轮（runs 为列表且 >1 条）时的断言语义：
-    - no_error: 每一轮都不能抛异常
-    - must_call / must_not_call: 看全程工具调用的并集（"整个会话里必须/禁止调用过"）
-    - response_contains（案例级）: 看最后一轮的最终输出（"聊完之后要给出…"）
-    - turns[i].response_contains（轮次级）: 看第 i+1 轮当轮输出
-    - state_after: 看最后一轮结束后的系统状态
+    results: list[AssertionResult] = []
+    for req in must_call:
+        tool = req.get("tool", "")
+        matching_args = args_by_tool.get(tool)
+        if not matching_args:
+            detail = f"缺少工具调用: {tool}"
+        else:
+            required = set(req.get("required_args", []))
+            missing = min((required.difference(args) for args in matching_args), key=len)
+            detail = (f"工具 {tool} 单次调用缺少参数: {sorted(missing)}"
+                      if missing else "")
+        results.append(AssertionResult("must_call", not detail, prefix + detail if detail else ""))
+
+    for req in must_not_call:
+        tool = req.get("tool", "")
+        ok = tool not in args_by_tool
+        results.append(AssertionResult(
+            "must_not_call", ok, "" if ok else f"{prefix}出现禁止调用: {tool}"))
+    return results
+
+
+def assert_case(case: EvalCase, runs: AgentRun | list[AgentRun]) -> list[AssertionResult]:
+    """执行全部 P1 断言，失败详情直接进报告。
+
+    案例级工具断言看全程，案例级输出和状态断言只看末轮；
+    turns[i] 的工具和输出断言只看第 i+2 轮。
     """
     runs = [runs] if isinstance(runs, AgentRun) else list(runs)
-    multi = len(runs) > 1
+    turns = case.turns or []
+    expected_turns = 1 + len(turns)
+    multi = expected_turns > 1 or len(runs) > 1
     results: list[AssertionResult] = []
 
     # Agent 自己崩了，后面不用看
@@ -115,43 +355,16 @@ def assert_case(case: EvalCase, runs: AgentRun | list[AgentRun]) -> list[Asserti
                                            f"{prefix}Agent 抛异常: {r.error}",
                                            AttributionLayer.SYSTEM))
         return results
+    if len(runs) < expected_turns:
+        return [AssertionResult("no_error", False,
+                                f"缺少第 {len(runs) + 1} 轮运行结果"
+                                f"（应有 {expected_turns} 轮，实际 {len(runs)} 轮）",
+                                AttributionLayer.SYSTEM)]
     results.append(AssertionResult("no_error", True, ""))
 
-    # 多轮：全程并集；单轮：本条轨迹
-    if multi:
-        called: list[str] = []
-        args_by_tool: dict[str, dict] = {}
-        for r in runs:
-            for t in r.tool_calls:
-                if t.name not in called:
-                    called.append(t.name)
-                args_by_tool.setdefault(t.name, {}).update(t.args or {})
-    else:
-        called = [t.name for t in runs[0].tool_calls]
-        args_by_tool = {t.name: (t.args or {}) for t in runs[0].tool_calls}
     final_run = runs[-1]
-
-    for req in case.must_call:
-        tool = req.get("tool", "")
-        ok = tool in called
-        detail = ""
-        if not ok:
-            detail = f"缺少工具调用: {tool}"
-        else:
-            # 参数断言：required_args 里的键必须存在（值正确性属 P2）
-            missing = [a for a in req.get("required_args", [])
-                       if a not in args_by_tool.get(tool, {})]
-            if missing:
-                ok = False
-                detail = f"工具 {tool} 缺少参数: {missing}"
-        results.append(AssertionResult("must_call", ok, detail))
-
-    for req in case.must_not_call:
-        tool = req.get("tool", "")
-        ok = tool not in called
-        results.append(AssertionResult(
-            "must_not_call", ok,
-            "" if ok else f"出现禁止调用: {tool}"))
+    results.extend(_tool_assertions(case.must_call, case.must_not_call,
+                                    [call for run in runs for call in run.tool_calls]))
 
     for kw in case.response_contains:
         ok = kw in (final_run.final_output or "")
@@ -159,16 +372,18 @@ def assert_case(case: EvalCase, runs: AgentRun | list[AgentRun]) -> list[Asserti
             "response_contains", ok,
             "" if ok else f"输出缺少关键词: {kw}（实际: {final_run.final_output[:60]!r}）"))
 
-    # 轮次级断言：turns[i] 对应 runs[i+1]（runs[0] 即 case.query 是第 1 轮）
-    if multi:
-        for j, turn_spec in enumerate(case.turns):
-            turn_run = runs[j + 1] if j + 1 < len(runs) else final_run
-            for kw in turn_spec.get("response_contains", []):
-                ok = kw in (turn_run.final_output or "")
-                results.append(AssertionResult(
-                    "response_contains", ok,
-                    "" if ok else f"第 {j + 2} 轮输出缺少关键词: {kw}"
-                                  f"（实际: {turn_run.final_output[:60]!r}）"))
+    for j, turn_spec in enumerate(turns, start=1):
+        turn_run = runs[j]
+        prefix = f"第 {j + 1} 轮"
+        results.extend(_tool_assertions(turn_spec.get("must_call", []),
+                                        turn_spec.get("must_not_call", []),
+                                        turn_run.tool_calls, f"{prefix} "))
+        output = turn_run.final_output or ""
+        for kw in turn_spec.get("response_contains", []):
+            ok = kw in output
+            results.append(AssertionResult(
+                "response_contains", ok,
+                "" if ok else f"{prefix}输出缺少关键词: {kw}（实际: {output[:60]!r}）"))
 
     for item in case.state_after:
         path = item.get("path", "")
@@ -191,6 +406,7 @@ def assert_case(case: EvalCase, runs: AgentRun | list[AgentRun]) -> list[Asserti
             "" if ok else f"状态 {path} 期望 {expect_desc}，实际 {actual!r}",
             AttributionLayer.SYSTEM))
 
+    results += _grounding_assertions(case, runs)
     return results
 
 
@@ -225,6 +441,10 @@ class EvalReport:
     level: str
     outcomes: list[CaseOutcome]
     repeat: int = 1
+    run_id: str = ""            # 一次跑批的唯一标识，快照/报告里贯穿
+    env: str = "local"          # 生产 / 预发 / 本地：不同环境的结果不可比
+    dataset: str = ""           # 本次跑的数据集标签（空 = 全量）
+    ts: str = ""                # 跑批时间戳
 
     @property
     def total(self) -> int:
@@ -237,6 +457,46 @@ class EvalReport:
     @property
     def success_rate(self) -> float:
         return self.passed / self.total if self.total else 0.0
+
+    def fingerprint(self) -> dict:
+        """运行指纹：回答「这两份报告能不能放在一起比」。
+
+        文章踩坑 1：生产与预发共用应用标识 → 评估任务混入不同环境的 Trace，
+        结果不可比较。指纹把环境 / 数据集 / 层级 / 版本四要素固化下来。
+        """
+        vs = self.versions_summary()
+        sig = hashlib.sha256(json.dumps(
+            {"env": self.env, "dataset": self.dataset, "level": self.level,
+             "repeat": self.repeat, "versions": vs},
+            sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:10]
+        return {
+            "run_id": self.run_id, "env": self.env,
+            "dataset": self.dataset or "all", "level": self.level,
+            "repeat": self.repeat, "ts": self.ts,
+            "versions": vs, "config_sig": sig,
+        }
+
+    def perf_summary(self) -> dict:
+        """延迟 / Token 汇总。实验对比时「改好了但慢了、贵了」必须看得见。"""
+        latencies = [o.run.latency_ms for o in self.outcomes
+                     if o.run and isinstance(o.run.latency_ms, (int, float))]
+        tokens = []
+        for o in self.outcomes:
+            u = (o.run.token_usage if o.run else None) or {}
+            if isinstance(u, dict) and u:
+                t = u.get("total")
+                if not isinstance(t, (int, float)):
+                    t = sum(v for v in u.values() if isinstance(v, (int, float)))
+                tokens.append(t)
+        out = {
+            "cases_with_latency": len(latencies),
+            "avg_latency_ms": round(sum(latencies) / len(latencies), 1)
+            if latencies else None,
+            "max_latency_ms": round(max(latencies), 1) if latencies else None,
+            "cases_with_tokens": len(tokens),
+            "total_tokens": int(sum(tokens)) if tokens else None,
+        }
+        return out
 
     def blockers_failed(self) -> list[CaseOutcome]:
         return [o for o in self.outcomes if not o.passed and o.case.severity == "blocker"]
@@ -284,6 +544,17 @@ class EvalReport:
             f"成功率: {self.success_rate:.1%}"
             + (f" ｜ 每条复跑 {self.repeat} 次" if self.repeat > 1 else "")
         ]
+        fp = self.fingerprint()
+        lines.append(f"运行指纹: run_id={fp['run_id'] or '未分配'} ｜ env={fp['env']} "
+                     f"｜ dataset={fp['dataset']} ｜ config={fp['config_sig']}")
+        perf = self.perf_summary()
+        if perf["cases_with_latency"] or perf["cases_with_tokens"]:
+            bits = []
+            if perf["avg_latency_ms"] is not None:
+                bits.append(f"平均耗时 {perf['avg_latency_ms']}ms")
+            if perf["total_tokens"] is not None:
+                bits.append(f"Token 合计 {perf['total_tokens']}")
+            lines.append("性能指标: " + " ｜ ".join(bits))
         flaky = self.flaky_cases()
         if flaky:
             lines.append(f"⚠ 非确定性用例 {len(flaky)} 条: "
@@ -336,7 +607,8 @@ class BatchRunner:
         else:
             all_runs = [self.adapter.run(case.query, merged)]
         results = assert_case(case, all_runs)
-        results += self._semantic_assertions(case, all_runs, level)
+        if len(all_runs) >= 1 + len(case.turns):
+            results += self._semantic_assertions(case, all_runs, level)
         passed = all(r.ok for r in results if not r.skipped)
 
         # 两个独立的归因口径，别混：
@@ -357,7 +629,8 @@ class BatchRunner:
                 for i, r in enumerate(results)
             ]
             first_error = FirstErrorFinder(steps).find()
-        return CaseOutcome(case, all_runs[0], results, passed, first_error, attribution,
+        return CaseOutcome(case, all_runs[0] if all_runs else None,
+                           results, passed, first_error, attribution,
                            runs=(all_runs if len(all_runs) > 1 else None))
 
     def _semantic_assertions(self, case: EvalCase,
@@ -380,7 +653,12 @@ class BatchRunner:
                                     AttributionLayer.COMPONENT, skipped=True,
                                     status="skipped")]
         final_output = runs[-1].final_output
-        r = self.judge.judge(case.query, case.judge_criteria, final_output)
+        trace = _merged_trace(runs)
+        if _judge_accepts_trace(self.judge):
+            r = self.judge.judge(case.query, case.judge_criteria, final_output,
+                                 trace=trace)
+        else:
+            r = self.judge.judge(case.query, case.judge_criteria, final_output)
         verdict = r.get("verdict", "need_review")
         evidence = r.get("evidence", [])
         if verdict == "pass":
@@ -397,10 +675,10 @@ class BatchRunner:
 
     def _run_repeats(self, case: EvalCase, repeat: int,
                      context: dict | None, level: str = "L0") -> CaseOutcome:
-        """复跑聚合：pass^k 口径（全过才算过），断言明细与多轮轨迹取第一次运行。"""
+        """复跑聚合：全过才算过；优先保留首次失败的断言和轨迹。"""
         outcomes = [self.run_case(case, context, level=level) for _ in range(repeat)]
         pass_runs = sum(1 for o in outcomes if o.passed)
-        base = outcomes[0]
+        base = next((o for o in outcomes if not o.passed), outcomes[0])
         return CaseOutcome(
             case=base.case, run=base.run, assertions=base.assertions,
             passed=(pass_runs == repeat),
@@ -411,9 +689,23 @@ class BatchRunner:
 
     def run_all(self, cases: list[EvalCase], level: str = "L0",
                 context: dict | None = None,
-                repeat: int = 1, max_workers: int = 1) -> EvalReport:
+                repeat: int = 1, max_workers: int = 1,
+                env: str | None = None,
+                dataset: str | list[str] | None = None) -> EvalReport:
+        """分层跑批。
+
+        env:     环境标识（默认读 EVAL_ENV 环境变量，再兜底 local）。
+                 生产/预发结果不可混比，compare_reports 会校验。
+        dataset: 只跑指定数据集标签的用例（str 或列表）；None = 全量。
+        """
         if repeat < 1 or max_workers < 1:
             raise ValueError("repeat 与 max_workers 必须 ≥ 1")
+        if dataset is not None:
+            wanted = {dataset} if isinstance(dataset, str) else set(dataset)
+            cases = [c for c in cases if c.dataset in wanted]
+            if not cases:
+                raise ValueError(f"dataset={sorted(wanted)} 过滤后没有用例，拒绝空跑批"
+                                 "（空报告会让门禁误放行）")
         if repeat == 1 and max_workers == 1:
             outcomes = [self.run_case(c, context, level=level) for c in cases]
         else:
@@ -424,7 +716,15 @@ class BatchRunner:
                 outcomes: list[Optional[CaseOutcome]] = [None] * len(cases)
                 for i, fut in futures:
                     outcomes[i] = fut.result()
-        return EvalReport(level=level, outcomes=outcomes, repeat=repeat)
+        ds_label = (dataset if isinstance(dataset, str)
+                    else ",".join(sorted(dataset)) if dataset else "")
+        return EvalReport(
+            level=level, outcomes=outcomes, repeat=repeat,
+            run_id=uuid.uuid4().hex[:12],
+            env=env or os.environ.get("EVAL_ENV") or "local",
+            dataset=ds_label,
+            ts=time.strftime("%Y-%m-%dT%H:%M:%S"),
+        )
 
 
 # ---------- 门禁判定（baseline 由调用方传入） ----------
@@ -456,6 +756,218 @@ def _runs_of(outcome: CaseOutcome) -> list[AgentRun]:
     return [outcome.run] if outcome.run else []
 
 
+def _snapshot_call(t: ToolCallRecord) -> dict:
+    """快照里的工具调用：默认只写 name/args（与旧格式完全兼容），
+    有返回值或调用失败时才补 result / ok 字段。"""
+    d = {"name": t.name, "args": t.args}
+    if t.result is not None:
+        d["result"] = _safe_value(t.result)
+    if not t.ok:
+        d["ok"] = False
+    return d
+
+
+def report_to_dict(report: EvalReport, gate_ok: bool | None = None,
+                   gate_reasons: list[str] | None = None,
+                   baseline: float | None = None) -> dict:
+    """统一的报告 JSON 格式。CLI / Web 控制台 / 版本对比共用一份，避免格式漂移。
+
+    逐题 diff 依赖这里输出 final_output / tool_calls / latency / token 全字段。
+    """
+    cases = []
+    for o in report.outcomes:
+        turns = _runs_of(o)
+        last = turns[-1] if turns else None
+        cases.append({
+            "id": o.case.case_id,
+            "case_hash": hashlib.sha256(json.dumps(
+                case_to_dict(o.case), sort_keys=True, ensure_ascii=False,
+                default=str).encode("utf-8")).hexdigest(),
+            "query": o.case.query,
+            "severity": o.case.severity,
+            "dataset": o.case.dataset,
+            "route": o.case.route,
+            "owner": o.case.owner,
+            "passed": o.passed,
+            "pass_runs": o.pass_runs,
+            "total_runs": o.total_runs,
+            "flaky": o.flaky,
+            "assertions": [
+                {"kind": a.kind, "ok": a.ok, "detail": a.detail,
+                 "layer": a.layer.value, "skipped": a.skipped,
+                 "status": a.result_status()}
+                for a in o.assertions
+            ],
+            "first_error": {
+                "step_id": o.first_error.step_id,
+                "target": o.first_error.target,
+                "layer": o.first_error.layer.value,
+                "detail": o.first_error.detail,
+            } if o.first_error else None,
+            "attribution": o.attribution,
+            "final_output": (last.final_output if last else "")[:300],
+            "tool_calls": [t.name for t in (last.tool_calls if last else [])],
+            "tool_results": [_safe_value(t.result) for t in (last.tool_calls if last else [])],
+            "retrieved": list(last.retrieved) if last else [],
+            "versions": dict(last.versions) if last else {},
+            "latency_ms": (last.latency_ms if last else None),
+            "token_usage": dict(last.token_usage) if last else {},
+        })
+    d = {
+        "total": report.total,
+        "passed": report.passed,
+        "success_rate": report.success_rate,
+        "blockers_failed": [o.case.case_id for o in report.blockers_failed()],
+        "versions": report.versions_summary(),
+        "fingerprint": report.fingerprint(),
+        "perf": report.perf_summary(),
+        "text_report": report.text(),
+        "semantic_stats": report.semantic_stats(),
+        "cases": cases,
+    }
+    if gate_ok is not None:
+        d["gate_ok"] = gate_ok
+        d["gate_reasons"] = gate_reasons or []
+        d["baseline"] = baseline
+    return d
+
+
+# ---------- 失败样本回流：让 Bad Case 变成下一次测试的输入 ----------
+
+def collect_failures(report: EvalReport) -> list[dict]:
+    """把本次失败用例加工成「候选回归样本」（不写盘，供导出/控制台预览）。
+
+    每条含：实际轨迹 + 失败断言明细 + 建议的 judge_criteria 草稿 +
+    一个可直接回灌评估集的 suggested_case。人工确认是必须环节——
+    线上失败输出绝不能被直接当成标准答案。
+    """
+    out: list[dict] = []
+    for o in report.outcomes:
+        if o.passed:
+            continue
+        turns = _runs_of(o)
+        last = turns[-1] if turns else None
+        failed = [{"kind": a.kind, "status": a.result_status(), "detail": a.detail}
+                  for a in o.assertions if a.result_status() == "failed"]
+        kinds = {f["kind"] for f in failed}
+        hints: list[str] = []
+        if kinds & {"response_contains", "semantic", "tool_result_used",
+                    "output_grounded_in"}:
+            hints.append("回答中的事实性结论必须能在工具返回值或召回片段里找到依据，"
+                         "不能编造、遗漏或答非所问")
+        if kinds & {"must_call", "tool_result_used"}:
+            hints.append("本轮必须真正调用所需工具并采用其返回结果，"
+                         "不能只凭对话上下文推断作答")
+        if kinds & {"state_after", "must_not_call"}:
+            hints.append("副作用与禁用工具的行为必须符合业务规则，不能只让最终回答看起来合理")
+        if o.flaky:
+            hints.append("该用例复跑时结果不稳定，需保证多次执行结论一致")
+
+        suggested = case_to_dict(o.case)
+        suggested["id"] = f"REG-{o.case.case_id}"
+        suggested["dataset"] = "regression"
+        existing = list(suggested.get("judge_criteria") or [])
+        suggested["judge_criteria"] = existing + [h for h in hints if h not in existing]
+        if not suggested["judge_criteria"]:
+            del suggested["judge_criteria"]
+
+        out.append({
+            "case_id": o.case.case_id,
+            "query": o.case.query,
+            "severity": o.case.severity,
+            "dataset": o.case.dataset,
+            "run_id": report.run_id,
+            "env": report.env,
+            "first_error": o.first_error.target if o.first_error else None,
+            "attribution": o.attribution,
+            "flaky": o.flaky,
+            "failed_assertions": failed,
+            "actual": {
+                "final_output": (last.final_output if last else "")[:1000],
+                "tool_calls": [
+                    {"name": t.name, "args": t.args, "ok": t.ok,
+                     "result": _safe_value(t.result)}
+                    for r in turns for t in r.tool_calls
+                ],
+                "retrieved": [x for r in turns for x in (r.retrieved or [])],
+                "state": _safe_value(last.state) if last else {},
+                "latency_ms": last.latency_ms if last else None,
+                "token_usage": dict(last.token_usage) if last else {},
+            },
+            "suggested_case": suggested,
+            "review_hint": "人工确认 suggested_case（尤其 judge_criteria）后再回灌；"
+                           "实际输出只是证据，不是标准答案",
+        })
+    return out
+
+
+def export_failures(path: str | Path, report: EvalReport) -> int:
+    """导出失败样本到 JSON 文件，返回条数。文件可反复覆盖（每次跑批一份）。"""
+    items = collect_failures(report)
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+    return len(items)
+
+
+def promote_failures(failures_path: str | Path, evalset_path: str | Path,
+                     ids: list[str] | None = None,
+                     out_path: str | Path | None = None,
+                     overwrite: bool = False) -> tuple[Path, int]:
+    """把人工确认过的候选样本回灌进评估集。
+
+    安全约束（默认不覆盖原文件）：
+    - 不写回原 evalset，另存 <name>.promoted.json；显式 overwrite=True 才原地写
+    - id 冲突自动加后缀避让，不静默覆盖既有用例
+    - 合并结果整集跑 load_evalset 校验，半成品不许落盘
+    - 写盘走临时文件 + replace，失败不留 .tmp
+    """
+    raw = json.loads(Path(failures_path).read_text(encoding="utf-8"))
+    if not isinstance(raw, list):
+        raise ValueError("失败样本文件应为数组")
+    picked = [x for x in raw if isinstance(x, dict) and
+              (ids is None or x.get("case_id") in ids)]
+    if not picked:
+        raise ValueError("没有选中任何失败样本（ids 过滤后为空）")
+
+    target = Path(evalset_path)
+    existing = json.loads(target.read_text(encoding="utf-8")) if target.exists() else []
+    if not isinstance(existing, list):
+        raise ValueError(f"{target}: 评估集应为数组")
+    seen = {str(x.get("id")) for x in existing if isinstance(x, dict)}
+
+    added = 0
+    for item in picked:
+        c = dict(item.get("suggested_case") or {})
+        if not c.get("id") or not c.get("query") or not c.get("severity"):
+            raise ValueError(f"样本 {item.get('case_id')} 的 suggested_case 不完整，拒绝回灌")
+        base = str(c["id"])
+        cid, n = base, 2
+        while cid in seen:
+            cid = f"{base}-{n}"
+            n += 1
+        c["id"] = cid
+        seen.add(cid)
+        existing.append(c)
+        added += 1
+
+    # 整集校验：先写临时文件走 load_evalset，通过才落最终文件
+    tmp = target.with_suffix(".json.promote.tmp")
+    out = Path(out_path) if out_path else (
+        target if overwrite else target.with_name(target.stem + ".promoted.json"))
+    try:
+        tmp.write_text(json.dumps(existing, ensure_ascii=False, indent=2),
+                       encoding="utf-8")
+        load_evalset(tmp)                 # 半成品 / 重复 id / 非法断言直接抛错
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(existing, ensure_ascii=False, indent=2),
+                       encoding="utf-8")
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+    return out, added
+
+
 def write_snapshots(path: str | Path, report: EvalReport) -> int:
     """把本次跑批的执行轨迹追加落成 JSONL 快照（回放的确定性来源）。
 
@@ -473,17 +985,23 @@ def write_snapshots(path: str | Path, report: EvalReport) -> int:
         for i, r in enumerate(turns):
             records.append({
                 "ts": ts,
+                "run_id": report.run_id,
+                "env": report.env,
+                "dataset": report.dataset or "all",
                 "level": report.level,
                 "case_id": o.case.case_id,
                 "severity": o.case.severity,
+                "case_dataset": o.case.dataset,
                 "turn": f"{i + 1}/{len(turns)}",
                 "session_id": (o.case.context_overrides or {}).get("session_id", ""),
                 "query": r.query,
-                "tool_calls": [{"name": t.name, "args": t.args} for t in r.tool_calls],
+                "tool_calls": [_snapshot_call(t) for t in r.tool_calls],
                 "retrieved": r.retrieved,
                 "final_output": r.final_output,
                 "state": r.state,
                 "versions": r.versions,
+                "latency_ms": r.latency_ms,
+                "token_usage": r.token_usage,
                 "error": r.error,
                 "passed": o.passed,
                 "semantic": semantic if i == len(turns) - 1 else [],
@@ -496,8 +1014,52 @@ def write_snapshots(path: str | Path, report: EvalReport) -> int:
     return len(records)
 
 
+def _env_of(rep: dict) -> str:
+    fp = rep.get("fingerprint") or {}
+    return str(rep.get("env") or fp.get("env") or "")
+
+
+def _case_diff(old_c: dict, new_c: dict) -> list[dict]:
+    """单条用例的逐题变化清单。只看报告里真实存在的字段（兼容旧格式）。"""
+    changes: list[dict] = []
+    if old_c.get("passed") != new_c.get("passed"):
+        changes.append({"field": "passed", "old": old_c.get("passed"),
+                        "new": new_c.get("passed")})
+    if "final_output" in old_c and "final_output" in new_c:
+        a, b = old_c.get("final_output") or "", new_c.get("final_output") or ""
+        if a != b:
+            changes.append({"field": "final_output", "old": a[:120], "new": b[:120]})
+    if "tool_calls" in old_c and "tool_calls" in new_c:
+        a, b = old_c.get("tool_calls") or [], new_c.get("tool_calls") or []
+        if a != b:
+            changes.append({"field": "tool_calls", "old": a, "new": b})
+    old_a = old_c.get("assertions") or []
+    new_a = new_c.get("assertions") or []
+    if old_a and new_a:
+        om = {f"{x.get('kind')}#{i}": x.get("status") or ("skipped" if x.get("skipped")
+              else ("passed" if x.get("ok") else "failed"))
+              for i, x in enumerate(old_a)}
+        nm = {f"{x.get('kind')}#{i}": x.get("status") or ("skipped" if x.get("skipped")
+              else ("passed" if x.get("ok") else "failed"))
+              for i, x in enumerate(new_a)}
+        for k in sorted(set(om) | set(nm)):
+            if om.get(k) != nm.get(k):
+                changes.append({"field": f"assertion:{k}",
+                                "old": om.get(k), "new": nm.get(k)})
+    for field in ("latency_ms", "token_usage", "attribution"):
+        if field in old_c and field in new_c and old_c.get(field) != new_c.get(field):
+            changes.append({"field": field, "old": old_c.get(field),
+                            "new": new_c.get(field)})
+    return changes
+
+
 def compare_reports(old: dict, new: dict) -> dict:
     """对比两份跑批报告 JSON，返回差异摘要 + 回放四档判定。
+
+    相比只看通过率，这里补上三层：
+    - 环境一致性（文章踩坑 1：生产/预发混跑 → 结果不可比，直接判作废）
+    - 逐题 diff（同一 case 的回答 / 断言 / 工具调用到底变了什么）
+    - 性能 delta（改好了但慢了、贵了，同样要能看见）
 
     四档判定复用 ReplayRunner 的阈值：
     |Δ|≤3pp 视为噪声本次作废；Δ≥+10pp 提升可合并；Δ≤-20pp 显著下降需排查；
@@ -508,6 +1070,11 @@ def compare_reports(old: dict, new: dict) -> dict:
     old_map = {c["id"]: c for c in old.get("cases", [])}
     new_map = {c["id"]: c for c in new.get("cases", [])}
     common = sorted(set(old_map) & set(new_map))
+    added_cases = sorted(new_map.keys() - old_map.keys())
+    removed_cases = sorted(old_map.keys() - new_map.keys())
+    changed_cases = [cid for cid in common
+                     if old_map[cid].get("case_hash") != new_map[cid].get("case_hash")]
+    evalset_mismatch = bool(added_cases or removed_cases or changed_cases)
 
     newly_failing = [cid for cid in common
                      if old_map[cid].get("passed") and not new_map[cid].get("passed")]
@@ -521,9 +1088,31 @@ def compare_reports(old: dict, new: dict) -> dict:
     blockers_new_fail = [cid for cid in newly_failing
                          if new_map[cid].get("severity") == "blocker"]
 
+    case_diffs = []
+    for cid in common:
+        ch = _case_diff(old_map[cid], new_map[cid])
+        if ch:
+            case_diffs.append({"id": cid, "changes": ch})
+
+    old_env, new_env = _env_of(old), _env_of(new)
+    env_mismatch = bool(old_env and new_env and old_env != new_env)
+
+    old_perf = old.get("perf") or {}
+    new_perf = new.get("perf") or {}
+    perf_delta: dict = {}
+    for k in ("avg_latency_ms", "max_latency_ms", "total_tokens"):
+        a, b = old_perf.get(k), new_perf.get(k)
+        if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+            perf_delta[k] = {"old": a, "new": b, "delta": round(b - a, 1)}
+
     delta = (new.get("success_rate") or 0.0) - (old.get("success_rate") or 0.0)
     rr = ReplayRunner(agent_fn=lambda s: 0.0)     # 只为复用阈值
-    if abs(delta) <= rr.NOISE_BAND:
+    if env_mismatch:
+        # 环境不一致时任何差值都不可信，优先于其他所有判定
+        verdict = f"invalid｜环境不一致（{old_env} → {new_env}），两份报告不可比较"
+    elif evalset_mismatch:
+        verdict = "invalid｜评估集不一致（用例新增、移除、定义变化或缺少对应指纹），通过率不可比较"
+    elif abs(delta) <= rr.NOISE_BAND:
         verdict = "invalid｜噪声带内，无法归因，本次作废（复跑或加样本）"
     elif delta >= rr.PROMOTE_GAIN:
         verdict = "promote｜提升可合并"
@@ -531,7 +1120,7 @@ def compare_reports(old: dict, new: dict) -> dict:
         verdict = "investigate｜显著下降需排查"
     else:
         verdict = "hold｜保持不合并，等更多证据"
-    if blockers_new_fail:
+    if blockers_new_fail and not (env_mismatch or evalset_mismatch):
         verdict = f"investigate｜显著下降需排查（blocker 新增失败: {blockers_new_fail}）"
 
     return {
@@ -542,8 +1131,14 @@ def compare_reports(old: dict, new: dict) -> dict:
         "newly_fixed": newly_fixed,
         "flaky_worse": flaky_worse,
         "flaky_fixed": flaky_fixed,
-        "added_cases": sorted(set(new_map) - set(old_map)),
-        "removed_cases": sorted(set(old_map) - set(new_map)),
+        "added_cases": added_cases,
+        "removed_cases": removed_cases,
+        "changed_cases": changed_cases,
+        "evalset_mismatch": evalset_mismatch,
+        "case_diffs": case_diffs,
+        "perf_delta": perf_delta,
+        "env_mismatch": env_mismatch,
+        "old_env": old_env, "new_env": new_env,
         "verdict": verdict,
     }
 
@@ -554,10 +1149,29 @@ def format_compare(diff: dict) -> str:
     old_r, new_r = diff["old_rate"], diff["new_rate"]
     if old_r is not None and new_r is not None:
         lines.append(f"  成功率: {old_r:.1%} → {new_r:.1%} ({diff['delta_pp']:+.1f}pp)")
+    if diff.get("env_mismatch"):
+        lines.append(f"  ⛔ 环境不一致: {diff['old_env']} → {diff['new_env']}（结果不可比较）")
     for label, key in [("新增失败", "newly_failing"), ("修复", "newly_fixed"),
                        ("flaky 恶化", "flaky_worse"), ("flaky 消除", "flaky_fixed"),
-                       ("新增用例", "added_cases"), ("移除用例", "removed_cases")]:
-        if diff[key]:
+                       ("新增用例", "added_cases"), ("移除用例", "removed_cases"),
+                       ("用例定义或指纹变化", "changed_cases")]:
+        if diff.get(key):
             lines.append(f"  {label}: {diff[key]}")
+    cd = diff.get("case_diffs") or []
+    if cd:
+        lines.append(f"  逐题变化 {len(cd)} 条:")
+        for item in cd[:8]:
+            fields = ", ".join(f"{c['field']}: {c['old']!r} → {c['new']!r}"
+                               for c in item["changes"][:3])
+            lines.append(f"    {item['id']}: {fields}")
+        if len(cd) > 8:
+            lines.append(f"    … 另有 {len(cd) - 8} 条")
+    pd = diff.get("perf_delta") or {}
+    if pd:
+        label = {"avg_latency_ms": "平均耗时(ms)",
+                 "max_latency_ms": "最大耗时(ms)", "total_tokens": "Token 合计"}
+        lines.append("  性能变化: " + " ｜ ".join(
+            f"{label.get(k, k)} {v['old']} → {v['new']} ({v['delta']:+})"
+            for k, v in pd.items()))
     lines.append(f"  回放判定: {diff['verdict']}")
     return "\n".join(lines)

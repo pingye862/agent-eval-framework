@@ -5,13 +5,17 @@
 
 API：
     GET  /                     前端页面
-    GET  /api/meta             评估集与适配器清单（含各自可用适配器）
+    GET  /api/meta             评估集与适配器清单（含 dataset 标签分布）
     GET  /api/health?adapter=  检测某适配器是否在线（HTTP 型被测对象用）
-    POST /api/run              跑批：{evalset, adapter, fixed, baseline}
+    POST /api/run              跑批：{evalset, adapter, fixed, baseline, level,
+                                dataset, env, export_failures}
     GET  /api/cases?path=      读评估集全部用例（path 必须已注册）
     POST /api/cases            新增用例：{path, case}
     PUT  /api/cases            更新用例：{path, id, case}
     DELETE /api/cases?path=&id= 删除用例
+    POST /api/failures/promote  失败样本回灌：{path, ids?, overwrite?}
+    POST /api/coverage         生成覆盖账本 HTML 报告
+    POST /api/projects         注册自定义项目
 """
 from __future__ import annotations
 
@@ -35,9 +39,11 @@ PROJECTS_FILE = WEBUI_DIR / "projects.json"            # 手动添加的项目�
 sys.path.insert(0, str(AGENT_EVAL))
 sys.path.insert(1, str(DEMO_DIR))
 
-from evalset import load_evalset                      # noqa: E402
+from evalset import load_evalset, dataset_counts      # noqa: E402
 from harness import (BatchRunner, gate_decision, write_snapshots,   # noqa: E402
-                     AgentAdapter, AgentRun, ToolCallRecord)
+                     AgentAdapter, AgentRun, ToolCallRecord,
+                     report_to_dict, collect_failures, export_failures,
+                     promote_failures)
 from judge import load_judge_from_env                # noqa: E402
 from report import build_ledger, render_coverage_html  # noqa: E402
 
@@ -196,6 +202,14 @@ def _validate_case(case: dict, others: list[dict],
             case[k] = [{"tool": s.strip()} for s in v.split(",") if s.strip()]
         elif isinstance(v, list):
             case[k] = [{"tool": str(x)} if isinstance(x, str) else x for x in v]
+    # 证据接地字段：空值直接删掉（不写进评估集），非空留给 load_evalset 做整集校验
+    for k in ("tool_result_used", "output_grounded_in"):
+        if k in case and not case[k]:
+            case.pop(k)
+    if not str(case.get("dataset") or "").strip():
+        case.pop("dataset", None)
+    else:
+        case["dataset"] = str(case["dataset"]).strip()
     if not str(case.get("route") or "").strip():
         case.pop("route", None)
     else:
@@ -387,53 +401,9 @@ def validate_project(p: dict) -> tuple[int, str]:
 
 
 def serialize_report(report, gate_ok, gate_reasons, baseline) -> dict:
-    cases = []
-    for o in report.outcomes:
-        cases.append({
-            "id": o.case.case_id,
-            "query": o.case.query,
-            "severity": o.case.severity,
-            "route": o.case.route,
-            "owner": o.case.owner,
-            "passed": o.passed,
-            "pass_runs": o.pass_runs,
-            "total_runs": o.total_runs,
-            "flaky": o.flaky,
-            "assertions": [
-                {"kind": a.kind, "ok": a.ok, "detail": a.detail,
-                 "layer": a.layer.value, "skipped": a.skipped,
-                 "status": a.result_status()}
-                for a in o.assertions
-            ],
-            "first_error": {
-                "step_id": o.first_error.step_id,
-                "target": o.first_error.target,
-                "layer": o.first_error.layer.value,
-                "detail": o.first_error.detail,
-            } if o.first_error else None,
-            "attribution": o.attribution,
-            "final_output": (o.run.final_output if o.run else "")[:300],
-            "tool_calls": [t.name for t in (o.run.tool_calls if o.run else [])],
-            "versions": dict(o.run.versions) if o.run else {},
-        })
-    versions = {}
-    for o in report.outcomes:
-        if o.run and o.run.versions:
-            versions = dict(o.run.versions)
-            break
-    return {
-        "total": report.total,
-        "passed": report.passed,
-        "success_rate": report.success_rate,
-        "blockers_failed": [o.case.case_id for o in report.blockers_failed()],
-        "gate_ok": gate_ok,
-        "gate_reasons": gate_reasons,
-        "baseline": baseline,
-        "versions": versions,
-        "text_report": report.text(),
-        "semantic_stats": report.semantic_stats(),
-        "cases": cases,
-    }
+    """报告 JSON 统一走 harness.report_to_dict（CLI / Web / 版本对比共用格式）。"""
+    return report_to_dict(report, gate_ok=gate_ok,
+                          gate_reasons=gate_reasons, baseline=baseline)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -463,7 +433,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, f.read_bytes(), "text/html; charset=utf-8")
             return
         if parsed.path == "/api/meta":
-            evalsets = {k: {**v, "cases": _safe_count(v["path"])}
+            evalsets = {k: {**v, "cases": _safe_count(v["path"]),
+                            "datasets": _safe_datasets(v["path"])}
                         for k, v in EVALSETS.items()}
             adapters = dict(ADAPTERS)
             for p in load_projects():
@@ -475,6 +446,7 @@ class Handler(BaseHTTPRequestHandler):
                     "adapters": [eid],
                     "adapter_type": p.get("adapter_type"),
                     "cases": n,
+                    "datasets": _safe_datasets(p.get("evalset") or ""),
                 }
                 adapters[eid] = {"label": f"{p['name']}（{p.get('adapter_type')}）"}
             self._json({
@@ -516,6 +488,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if path == "/api/failures/promote":
+            try:
+                body = json.loads(self.rfile.read(
+                    int(self.headers.get("Content-Length", 0))))
+            except Exception as e:                        # noqa: BLE001
+                self._json({"error": f"请求体非法: {e}"}, 400)
+                return
+            self._handle_promote(body)
+            return
         if path == "/api/cases":
             try:
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
@@ -596,6 +577,14 @@ class Handler(BaseHTTPRequestHandler):
             baseline = float(body.get("baseline", 1.0))
             level = str(body.get("level") or "L0").upper()
             force_uncalibrated = bool(body.get("force_uncalibrated", False))
+            dataset = body.get("dataset") or None
+            if dataset is not None and not isinstance(dataset, (str, list)):
+                raise ValueError("dataset 应为字符串或字符串数组")
+            env = body.get("env") or None
+            if env is not None and (not isinstance(env, str)
+                                    or not re.match(r"^[\w.-]{1,32}$", env)):
+                raise ValueError("env 只能是 1~32 位字母/数字/下划线/连字符/点")
+            export_failures_flag = bool(body.get("export_failures", False))
             if level not in ("L0", "L1", "L2"):
                 raise ValueError("level 只能是 L0 / L1 / L2")
         except Exception as e:                            # noqa: BLE001
@@ -640,7 +629,8 @@ class Handler(BaseHTTPRequestHandler):
                             "hint": "用例维护面板：选这个评估集 → 新增用例 → 保存"}, 400)
                 return
             cases = load_evalset(meta["path"])
-            report = BatchRunner(adapter, judge=judge).run_all(cases, level=level)
+            report = BatchRunner(adapter, judge=judge).run_all(
+                cases, level=level, dataset=dataset, env=env)
         except Exception as e:                            # noqa: BLE001
             self._json({"error": f"跑批失败: {e}"}, 500)
             return
@@ -659,7 +649,34 @@ class Handler(BaseHTTPRequestHandler):
         payload = serialize_report(report, gate_ok, reasons, baseline)
         payload["level"] = level
         payload["judge_note"] = judge_note
+        # 失败样本回流：跑完就能把 Bad Case 导成候选回归样本，
+        # 人工确认后经 /api/failures/promote 回灌评估集（闭环第 5 环）
+        payload["failures"] = collect_failures(report)
+        if export_failures_flag:
+            fp = WEBUI_DIR / "failures.json"
+            export_failures(fp, report)
+            payload["failures_path"] = str(fp)
         self._json(payload)
+
+    def _handle_promote(self, body: dict) -> None:
+        """POST /api/failures/promote：把确认过的失败样本回灌到已注册评估集。"""
+        try:
+            path = resolve_evalset_path(body.get("path", ""))
+            src = body.get("failures_path") or str(WEBUI_DIR / "failures.json")
+            ids = body.get("ids") or None
+            if ids is not None and not isinstance(ids, list):
+                raise ValueError("ids 应为数组")
+            overwrite = bool(body.get("overwrite", False))
+            out, added = promote_failures(src, path, ids=ids, overwrite=overwrite)
+        except ValueError as e:                           # noqa: BLE001
+            self._json({"error": str(e)}, 400)
+            return
+        except Exception as e:                            # noqa: BLE001
+            self._json({"error": f"回灌失败: {e}"}, 500)
+            return
+        self._json({"ok": True, "added": added, "out": str(out),
+                    "note": "默认另存为 <name>.promoted.json，未覆盖原评估集"
+                            if not overwrite else "已原地回灌到评估集"})
 
 
     def do_PUT(self):
@@ -723,6 +740,14 @@ def _safe_count(path: str) -> int:
         return len(_read_cases(Path(path)))
     except Exception:                                     # noqa: BLE001
         return -1
+
+
+def _safe_datasets(path: str) -> dict[str, int]:
+    """显示用：各 dataset 标签的用例数（坏文件返回空字典）。"""
+    try:
+        return dataset_counts(path)
+    except Exception:                                     # noqa: BLE001
+        return {}
 
 
 def main() -> None:

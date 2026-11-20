@@ -7,15 +7,23 @@
     python3 run_eval.py --level L1 # 启用 P2 语义判分（需先 export EVAL_MODEL_*，
                                    # 且金标校准通过后 judge 才会真正上岗）
     python3 run_eval.py --coverage # 同时生成覆盖账本审计报告（coverage.html）
+    python3 run_eval.py --dataset regression          # 只跑回归集
+    python3 run_eval.py --report-json report.json    # 存报告 JSON 供版本对比
+    python3 run_eval.py --compare old.json           # 与上次报告逐题对比
+    python3 run_eval.py --export-failures f.json     # 导出失败样本（候选回归用例）
+    python3 run_eval.py --promote-failures f.json    # 人工确认后回灌评估集
 """
 import sys
 import os
 import argparse
+import json
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from agent_eval_lib import (BatchRunner, gate_decision, load_evalset,
                             load_judge_from_env, build_ledger,
-                            render_coverage_html, render_coverage_text)
+                            render_coverage_html, render_coverage_text,
+                            report_to_dict, compare_reports, format_compare,
+                            export_failures, promote_failures)
 
 HERE = os.path.dirname(__file__)
 
@@ -33,7 +41,29 @@ def main() -> int:
                     help="仅本地演示：未做金标校准也放行 judge。生产环境禁止使用")
     ap.add_argument("--coverage", action="store_true",
                     help="生成覆盖账本审计报告 coverage.html")
+    ap.add_argument("--dataset", default=None,
+                    help="只跑指定数据集标签（smoke / regression / baseline，可自定义）")
+    ap.add_argument("--env", default=None,
+                    help="环境标识（默认读 EVAL_ENV，再兜底 local）；不同环境报告不可比")
+    ap.add_argument("--report-json", default=None,
+                    help="把报告写成 JSON，供 --compare 做版本对比")
+    ap.add_argument("--compare", default=None,
+                    help="与这份历史报告 JSON 对比（逐题 diff + 性能 delta + 四档判定）")
+    ap.add_argument("--export-failures", default=None,
+                    help="导出失败样本到 JSON（含实际轨迹 + 建议判分标准草稿）")
+    ap.add_argument("--promote-failures", default=None,
+                    help="把确认过的失败样本回灌评估集（默认另存 .promoted.json）")
+    ap.add_argument("--promote-overwrite", action="store_true",
+                    help="配合 --promote-failures：原地覆盖评估集（默认关闭，更安全）")
     args = ap.parse_args()
+
+    if args.promote_failures:
+        out, n = promote_failures(args.promote_failures, args.evalset,
+                                  overwrite=args.promote_overwrite)
+        print(f"已回灌 {n} 条 → {out}")
+        if not args.promote_overwrite:
+            print("（默认另存，未覆盖原评估集；确认无误后替换，或加 --promote-overwrite）")
+        return 0
 
     judge = load_judge_from_env() if args.level != "L0" else None
     if args.level != "L0":
@@ -48,13 +78,14 @@ def main() -> int:
                 print("⚠ judge 未通过金标校准，P2 语义判分跳过并标注。"
                       "想看判分效果可加 --force-uncalibrated（仅限本地演示）")
 
-    cases = load_evalset(args.evalset)
+    cases = load_evalset(args.evalset, dataset=args.dataset)
     adapter_cls = __import__("adapter").ShoppingAgentAdapter
     # --fixed 不再改 agent.BUGS 全局（多线程跑批有竞态），改为按 context 注入
     context = ({"bugs": {k: False for k in __import__("agent").BUGS}}
                if args.fixed else None)
     report = BatchRunner(adapter_cls(), judge=judge).run_all(
-        cases, level=args.level, context=context)
+        cases, level=args.level, context=context,
+        dataset=args.dataset, env=args.env)
     print(report.text())
 
     if args.coverage:
@@ -73,6 +104,24 @@ def main() -> int:
         print(f"  - {r}")
     if not ok:
         print("\n（修复 agent.py 顶部的 BUGS 开关后重跑，观察门禁从红变绿）")
+
+    if args.report_json or args.compare:
+        payload = report_to_dict(report, gate_ok=ok, gate_reasons=reasons,
+                                 baseline=args.baseline)
+        if args.report_json:
+            with open(args.report_json, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            print(f"报告 JSON: {args.report_json}")
+        if args.compare:
+            with open(args.compare, encoding="utf-8") as f:
+                old = json.load(f)
+            print(format_compare(compare_reports(old, payload)))
+
+    if args.export_failures:
+        n = export_failures(args.export_failures, report)
+        print(f"失败样本已导出 {n} 条 → {args.export_failures}")
+        if n:
+            print("人工确认 suggested_case 后用 --promote-failures 回灌评估集")
     return 0 if ok else 1
 
 

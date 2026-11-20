@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import urllib.request
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -36,7 +37,19 @@ JUDGE_SYSTEM_PROMPT = """你是 AI Agent 评测的语义判分器。根据判分
 - pass: 回答完全满足全部判分标准
 - fail: 回答违反至少一条判分标准
 - need_review: 证据不足、无法判断（宁可复核，不硬判）
-- evidence 每条必须引用回答中的具体内容作为依据"""
+- evidence 每条必须引用回答中的具体内容作为依据
+
+多轮对话使用规则（若提供【多轮对话】段）：
+- 【末轮用户问题】和【末轮 Agent 回答】是同一对话的末轮，不是额外一轮
+- 【多轮对话】按发生顺序列出各轮问答；按判分标准核对末轮回答及跨轮表现，不要把早先的回答当作末轮答案
+
+执行证据使用规则（若提供【执行证据】段）：
+- 工具调用成功、接口状态正常，都不代表任务完成；须核对回答中的事实性结论
+  是否与工具返回值 / 召回片段一致，以及关键结论是否完整交付
+- 回答中的数字、型号、状态、结论若在证据里找不到依据，或与证据冲突，判 fail
+- 证据显示工具已返回结果、但回答声称「没有数据 / 查不到」，判 fail
+- 证据本身缺失或读不出结论时判 need_review，不要凭空猜测
+- 判分标准始终是唯一依据；执行证据只用于核验证据支持度，不额外增加标准"""
 
 
 # ---------- 校准统计（金标集驱动） ----------
@@ -79,6 +92,8 @@ class CalibrationReport:
     pass_agreement: bool      # ≥ 0.85（粗筛门槛）
     pass_kappa: bool          # ≥ 0.80（随机一致性修正后的精评门槛）
     qualified: bool
+    need_review_count: int = 0
+    need_review_rate: float = 0.0
 
 
 class JudgeError(Exception):
@@ -161,20 +176,45 @@ class SemanticJudge:
     calibrated: bool = False
     calibration: Optional[CalibrationReport] = None
     last_errors: list[str] = field(default_factory=list)   # 调试留档：最近几次调用失败原因
-    cache_judgments: bool = True   # 相同 (query, criteria, output) 只判一次，pass^k 复跑不重复烧 token
+    cache_judgments: bool = True   # 相同 (query, criteria, output, trace) 只判一次
     _cache: dict = field(default_factory=dict, repr=False)
 
-    def judge(self, query: str, criteria: list[str], output: str) -> dict:
+    def judge(self, query: str, criteria: list[str], output: str,
+              trace: dict | None = None) -> dict:
         """判一条输出。返回 {"verdict": pass/fail/need_review, "evidence": [...]}。
 
+        trace: 来自 AgentRun.trace_context() 的可选执行证据（tool_calls / retrieved / state），
+               多轮用例还包含按顺序排列的 turns（每轮含 query / final_output）。
         任何调用失败都降级为 need_review —— 判分器故障不能污染跑批结果。
         """
-        key = (query, tuple(criteria), output)
+        trace_key = (json.dumps(trace, ensure_ascii=False, sort_keys=True,
+                                default=str) if trace is not None else "")
+        # 缓存 key 必须纳入轨迹：同一句回答、背后工具返回不同，判定可能完全相反
+        # （文章 Case B：工具都成功返回，回答却说「没数据」）。
+        key = (query, tuple(criteria), output, trace_key)
         if self.cache_judgments and key in self._cache:
             return self._cache[key]
-        user = (f"【判分标准】\n" + "\n".join(f"- {c}" for c in criteria)
-                + f"\n\n【用户问题】\n{query}"
-                + f"\n\n【Agent 回答】\n{output or '（空输出）'}")
+        turns = trace.get("turns") if trace is not None else None
+        query_heading = "末轮用户问题" if turns else "用户问题"
+        answer_heading = "末轮 Agent 回答" if turns else "Agent 回答"
+        target_query = turns[-1]["query"] if turns else query
+        user = ("【判分标准】\n" + "\n".join(f"- {c}" for c in criteria)
+                + f"\n\n【{query_heading}】\n{target_query}"
+                + f"\n\n【{answer_heading}】\n{output or '（空输出）'}")
+        if turns:
+            dialogue = "\n\n".join(
+                f"第 {i} 轮\n用户问题：{turn['query']}\n"
+                f"Agent 回答：{turn['final_output'] or '（空输出）'}"
+                for i, turn in enumerate(turns, start=1)
+            )
+            user += f"\n\n【多轮对话】（按发生顺序，含末轮）\n{dialogue}"
+        if trace is not None:
+            execution_trace = {k: v for k, v in trace.items() if k != "turns"}
+            if execution_trace:
+                evidence = json.dumps(execution_trace, ensure_ascii=False, default=str)
+                if len(evidence) > 3000:
+                    evidence = evidence[:3000] + "…（已截断）"
+                user += f"\n\n【执行证据】（工具调用与返回值 / 召回片段 / 结束状态）\n{evidence}"
         try:
             raw = self.client.chat(JUDGE_SYSTEM_PROMPT, user)
             result = _parse_verdict(raw)
@@ -195,30 +235,43 @@ class SemanticJudge:
 
 def calibrate_judge(machine: list[str], human: list[str],
                     min_samples: int = 200) -> CalibrationReport:
-    """judge 上岗校准。machine/human 为 pass/fail 标签序列（人工金标 vs judge 判定）。
+    """judge 上岗校准。人工金标只允许 pass/fail，机器另可输出 need_review。
 
-    门槛：一致率 ≥85% 且 Cohen's κ ≥0.8。
-    need_review 样本按「不一致」计——judge 说不准本身就是不达标。
+    门槛：一致率 ≥85% 且三类别 Cohen's κ ≥0.8。
+    need_review 是独立类别，保留在总样本中且始终与人工标签不一致。
     """
     if len(machine) != len(human) or not machine:
         raise ValueError("金标集样本数为空或长度不一致")
-    if len(machine) < min_samples:
+    human_labels = ("pass", "fail")
+    machine_labels = (*human_labels, "need_review")
+    for side, values, allowed in (("machine", machine, machine_labels),
+                                  ("human", human, human_labels)):
+        for i, value in enumerate(values):
+            if value not in allowed:
+                raise ValueError(f"{side}[{i}] 标签非法: {value!r}，仅允许 {', '.join(allowed)}")
+    n = len(machine)
+    if n < min_samples:
         raise ValueError(
-            f"金标集不足 {min_samples} 条（当前 {len(machine)}），不能给 judge 上岗"
+            f"金标集不足 {min_samples} 条（当前 {n}），不能给 judge 上岗"
             "——小样本校准出来的 judge 是过拟合的")
-    m01 = [1.0 if v == "pass" else 0.0 for v in machine]
-    h01 = [1.0 if v == "pass" else 0.0 for v in human]
-    ag = agreement_rate(m01, h01)
-    kp = cohen_kappa(m01, h01)
+    machine_counts, human_counts = Counter(machine), Counter(human)
+    hits = sum(m == h for m, h in zip(machine, human))
+    ag = hits / n
+    # 将观测一致率与随机一致率都乘以 n²，避免浮点误差影响退化情形及门槛判断。
+    expected = sum(machine_counts[label] * human_counts[label] for label in machine_labels)
+    kp = (hits * n - expected) / (n * n - expected) if expected != n * n else 1.0
     ok_ag, ok_kp = ag >= 0.85, kp >= 0.80
+    need_review_count = machine_counts["need_review"]
     return CalibrationReport(
         dim="semantic_judge",
-        n=len(machine),
+        n=n,
         agreement=round(ag, 4),
         kappa=round(kp, 4),
         pass_agreement=ok_ag,
         pass_kappa=ok_kp,
         qualified=ok_ag and ok_kp,
+        need_review_count=need_review_count,
+        need_review_rate=round(need_review_count / n, 4),
     )
 
 

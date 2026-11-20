@@ -1,24 +1,24 @@
 # 小白上手指南：从零跑通 AI Agent 的自动化测试
 
-> 这份文档假设你**没写过测试**、也没读过项目 README。
-> 跟着做，10 分钟内你会看到自己的第一份 Agent 测试报告。
+> 这份文档假设你**没写过测试**、也没读过项目 README。  
+> 跟着做，10 分钟内你会看到自己的第一份 Agent 测试报告。  
 > 每条命令都可以直接复制粘贴，每个输出都有「这一行是什么意思」的解释。
 
 ---
 
 ## 1. 这个框架是干嘛的？（30 秒版）
 
-你做了一个 AI Agent（比如一个能查价格、发通知的客服机器人），
+你做了一个 AI Agent（比如一个能查价格、发通知的客服机器人），  
 每次改完代码你都心里发虚：**它会不会悄悄变傻了？**
 
 这个框架就是替你「考试」的：
 
-| 生活里的比喻 | 框架里的说法 | 作用 |
-|---|---|---|
-| 一张考卷 | 评估集（evalset.json） | 一堆问题 + 标准答案要点 |
-| 阅卷规则 | 断言（assertion） | 「必须调用查价工具」「回答里必须有 5999」 |
-| 录取分数线 | 门禁（gate） | 不达标就**禁止合并代码** |
-| 老师批改 | 跑批（run） | 让你的 Agent 真的答一遍卷子，逐题判分 |
+| 生活里的比喻 | 框架里的说法            | 作用                      |
+| ------ | ----------------- | ----------------------- |
+| 一张考卷   | 评估集（evalset.json） | 一堆问题 + 标准答案要点           |
+| 阅卷规则   | 断言（assertion）     | 「必须调用查价工具」「回答里必须有 5999」 |
+| 录取分数线  | 门禁（gate）          | 不达标就**禁止合并代码**          |
+| 老师批改   | 跑批（run）           | 让你的 Agent 真的答一遍卷子，逐题判分  |
 
 **核心卖点：你的 Agent 一行代码都不用改**，所有接入都发生在测试侧。
 
@@ -31,7 +31,7 @@ python3 --version    # 3.9 及以上即可，3.10+ 更佳
 git --version        # 能 clone 仓库就行
 ```
 
-没有 `pip install`、没有依赖地狱——整个框架**只用 Python 标准库**。
+没有 `pip install`、没有依赖地狱——整个框架**只用 Python 标准库**。  
 （唯一例外：把门禁挂进 CI 时需要 `pip install pytest`，第 5 节第 5 步会讲。）
 
 ---
@@ -47,35 +47,41 @@ cd agent-eval-framework
 
 ### 3.2 跑一个「故意有 bug 的机器人」
 
-仓库自带一个数码导购 Agent，内置 3 个可控缺陷（调错工具、漏发通知、编造参数）。
-先进它的目录，跑一次：
+仓库自带一个数码导购 Agent，内置 4 个可控缺陷（调错工具、漏发通知、  
+编造参数、**工具返回了结果却没汇总进回答**）。先进它的目录，跑一次：
 
 ```bash
 cd agent_eval/examples/demo_project
 python3 run_eval.py
 ```
 
-你会看到类似输出（数字以实际为准）：
+你会看到类似输出（`run_id` 每次不同，数字以实际为准）：
 
 ```
-级别: L0 ｜ 用例: 8 ｜ 通过: 3 ｜ 成功率: 37.5%
+级别: L0 ｜ 用例: 9 ｜ 通过: 3 ｜ 成功率: 33.3%
+运行指纹: run_id=9ccc4a4fb38d ｜ env=local ｜ dataset=all ｜ config=24b28a3c68
+性能指标: 平均耗时 120.0ms ｜ Token 合计 3420
+--------------------------------------------------------------
 ✗ CS-001 [blocker] iPhone 15 现在多少钱
     [must_call] 缺少工具调用: query_price
-    第一错: 1_must_call (must_call) → 主归因: system
+    [must_not_call] 出现禁止调用: query_product
+    第一错: 1_must_call (must_call) → 主归因: trajectory
 ...
 门禁判定: ⛔ 拦截合并
 ```
 
 **逐行解读：**
 
-| 你看到的 | 意思 |
-|---|---|
-| `用例: 8 ｜ 通过: 3` | 考卷 8 道题，只答对 3 道 |
-| `✗ CS-001 [blocker]` | 第 1 题挂了，且它是 blocker 级（一票否决的核心题） |
-| `[must_call] 缺少工具调用: query_price` | 挂的原因：查价格却没调查价工具 |
-| `第一错: 1_must_call` | 链路上**第一个**出错的位置（定位用） |
-| `主归因: system` | 该怪谁：system/trajectory/component 三层里，优先归到上游 |
-| `门禁判定: ⛔ 拦截合并` | 这版代码不许上线 |
+| 你看到的                              | 意思                                                         |
+| --------------------------------- | ---------------------------------------------------------- |
+| `用例: 9 ｜ 通过: 3`                   | 考卷 9 道题，只答对 3 道                                            |
+| `运行指纹`                            | 这次跑批的身份证：环境、数据集、版本配置哈希；两份报告能不能比，就看它                        |
+| `性能指标`                            | 平均耗时与 Token 合计；改好了但变慢变贵，对比报告里看得见                           |
+| `✗ CS-001 [blocker]`              | 第 1 题挂了，且它是 blocker 级（一票否决的核心题）                            |
+| `[must_call] 缺少工具调用: query_price` | 挂的原因：查价格却没调查价工具                                            |
+| `第一错: 1_must_call`                | 链路上**第一个**出错的位置（定位用）                                       |
+| `主归因: trajectory`                 | 该怪谁：按 system > trajectory > component 固定优先级定责（与「第一错」是两个口径） |
+| `门禁判定: ⛔ 拦截合并`                    | 这版代码不许上线                                                   |
 
 ### 3.3 把 bug「修好」，看门禁变绿
 
@@ -84,11 +90,12 @@ python3 run_eval.py --fixed
 ```
 
 ```
-级别: L0 ｜ 用例: 8 ｜ 通过: 8 ｜ 成功率: 100.0%
+级别: L0 ｜ 用例: 9 ｜ 通过: 9 ｜ 成功率: 100.0%
+运行指纹: run_id=b037ce33f346 ｜ env=local ｜ dataset=all ｜ config=24b28a3c68
 门禁判定: ✅ 放行合并
 ```
 
-**红 → 绿，这就是这个框架的全部工作方式。**
+**红 → 绿，这就是这个框架的全部工作方式。**  
 以后你的真实项目里：改完代码跑一次，红了就不合并，就这么简单。
 
 ### 3.4 CI 模式（返回码红 = 构建失败）
@@ -98,7 +105,7 @@ python3 run_eval.py --gate --baseline 0.95 ; echo "退出码: $?"
 # 门禁不达标时退出码是 1（CI 会判红），达标是 0
 ```
 
-`--baseline 0.95` 的意思：历史成功率基线是 95%，这次比基线掉超过 2 个百分点就拦截。
+`--baseline 0.95` 的意思：历史成功率基线是 95%，这次比基线掉超过 2 个百分点就拦截。  
 （防「这次 90%、上次 96%，平均看着还行」的温水煮青蛙式劣化。）
 
 ---
@@ -119,7 +126,7 @@ python3 server.py
 - **加你自己的项目**：点「➕ 自定义项目」，填你的 Agent 接口地址就能测
 - **生成覆盖审计报告**：点一下产出 `coverage.html`，看哪些业务场景还没被测到
 
-> 提示：`L0 / L1 / L2` 是评测层级。**L0 = 只跑确定性断言**（关键词、工具调用），
+> 提示：`L0 / L1 / L2` 是评测层级。**L0 = 只跑确定性断言**（关键词、工具调用），  
 > L1/L2 会额外启用「LLM 语义判分」（第 7 节）。新手先用 L0 完全够。
 
 ---
@@ -154,7 +161,7 @@ cp agent_eval/examples/demo_project/run_eval.py my_project/
 
 ### 第 2 步：写 adapter.py（唯一要动脑的文件）
 
-新建 `my_project/adapter.py`，把「你的 Agent 怎么调用、返回什么」翻译给框架。
+新建 `my_project/adapter.py`，把「你的 Agent 怎么调用、返回什么」翻译给框架。  
 两种常见形态：
 
 **形态 A：你的 Agent 是个 HTTP 服务**
@@ -227,22 +234,22 @@ class MyAgentAdapter(AgentAdapter):
 
 **用例字段字典**（按需加，全部可选除前三项）：
 
-| 字段 | 类型 | 作用 | 例子 |
-|---|---|---|---|
-| `id` | 字符串，必填 | 用例编号，报告里靠它定位 | `"T-001"` |
-| `query` | 字符串，必填 | 用户的原话 | `"查下明天天气"` |
-| `severity` | 三选一，必填 | 严重级别：`blocker` 挂一条就拦截；`major` 计入成功率；`minor` 提示 | `"blocker"` |
-| `must_call` | 数组 | 必须调用的工具（可带参数存在性检查） | `[{"tool": "get_weather", "required_args": ["city"]}]` |
-| `must_not_call` | 数组 | 禁止调用的工具 | `[{"tool": "delete_record"}]` |
-| `response_contains` | 数组 | 回答里必须出现的关键词 | `["晴", "25 度"]` |
-| `state_after` | 数组 | 执行完后的状态检查（副作用） | `[{"path": "notify_log", "min_length": 1}]` |
-| `context_overrides` | 对象 | 这条用例的前置条件（如 VIP 身份） | `{"notify_required": true}` |
-| `persona` | 字符串 | 用户画像备注，给人看的 | `"VIP 用户"` |
-| `judge_criteria` | 数组 | 语义判分标准（自然语言），见第 7 节 | `["不得编造数据"]` |
-| `turns` | 数组 | 多轮对话的后续轮次，见第 7 节 | `[{"query": "那后天呢"}]` |
+| 字段                  | 类型     | 作用                                             | 例子                                                     |
+| ------------------- | ------ | ---------------------------------------------- | ------------------------------------------------------ |
+| `id`                | 字符串，必填 | 用例编号，报告里靠它定位                                   | `"T-001"`                                              |
+| `query`             | 字符串，必填 | 用户的原话                                          | `"查下明天天气"`                                             |
+| `severity`          | 三选一，必填 | 严重级别：`blocker` 挂一条就拦截；`major` 计入成功率；`minor` 提示 | `"blocker"`                                            |
+| `must_call`         | 数组     | 必须调用的工具（可带参数存在性检查）                             | `[{"tool": "get_weather", "required_args": ["city"]}]` |
+| `must_not_call`     | 数组     | 禁止调用的工具                                        | `[{"tool": "delete_record"}]`                          |
+| `response_contains` | 数组     | 回答里必须出现的关键词                                    | `["晴", "25 度"]`                                        |
+| `state_after`       | 数组     | 执行完后的状态检查（副作用）                                 | `[{"path": "notify_log", "min_length": 1}]`            |
+| `context_overrides` | 对象     | 这条用例的前置条件（如 VIP 身份）                            | `{"notify_required": true}`                            |
+| `persona`           | 字符串    | 用户画像备注，给人看的                                    | `"VIP 用户"`                                             |
+| `judge_criteria`    | 数组     | 语义判分标准（自然语言），见第 7 节                            | `["不得编造数据"]`                                           |
+| `turns`             | 数组     | 多轮对话的后续轮次，见第 7 节                               | `[{"query": "那后天呢"}]`                                  |
 
-> **出题心法**：`blocker` 只留给「错了就是事故」的场景（转账金额错、删库），
-> 别全标 blocker——满卷都是重点等于没有重点。参考 demo 的 8 条：3 blocker / 4 major / 1 minor。
+> **出题心法**：`blocker` 只留给「错了就是事故」的场景（转账金额错、删库），  
+> 别全标 blocker——满卷都是重点等于没有重点。参考 demo 的 9 条：5 blocker / 3 major / 1 minor。
 
 ### 第 4 步：跑起来
 
@@ -251,7 +258,7 @@ cd my_project
 python3 run_eval.py --evalset evalset.json --gate
 ```
 
-> 本节流程已实测可跑通：新建目录 → 抄 run_eval.py 改那两行 → 写 adapter 和
+> 本节流程已实测可跑通：新建目录 → 抄 run_eval.py 改那两行 → 写 adapter 和  
 > evalset.json → 跑批出报告，全程不需要动框架一行代码。
 
 ### 第 5 步（可选）：挂进 GitHub Actions
@@ -281,12 +288,12 @@ jobs:
 
 对着你的 Agent 业务，按这张表填空，每格至少 1 条用例：
 
-| | 用户问得正常 | 用户问得刁钻 |
-|---|---|---|
-| **Agent 会** | 主流程：查价、查询、下单 | 边界：没听清机型、两个需求混一句 |
-| **Agent 不会** | 兜底：转人工而不是瞎编 | 红线：没权限的数据绝不能吐 |
+|              | 用户问得正常       | 用户问得刁钻           |
+| ------------ | ------------ | ---------------- |
+| **Agent 会**  | 主流程：查价、查询、下单 | 边界：没听清机型、两个需求混一句 |
+| **Agent 不会** | 兜底：转人工而不是瞎编  | 红线：没权限的数据绝不能吐    |
 
-demo 的 CS-006 就是「不会 + 刁钻」格：问电池容量（知识库里没有），
+demo 的 CS-006 就是「不会 + 刁钻」格：问电池容量（知识库里没有），  
 断言回答必须包含「人工」——**防幻觉是 Agent 测试的重灾区，优先覆盖**。
 
 ---
@@ -308,11 +315,11 @@ demo 的 CS-006 就是「不会 + 刁钻」格：问电池容量（知识库里�
 }
 ```
 
-第 2 轮的断言只看第 2 轮的回答——考验 Agent 记不记得上下文。
+写在 `turns` 里的断言只检查对应轮次：`response_contains` 看当轮回答，`must_call` / `must_not_call` 看当轮工具调用。写在用例顶层的工具断言仍检查全程；`required_args` 要求至少一次真实调用同时包含所有指定参数。
 
 ### 7.2 LLM 语义判分（P2）
 
-关键词断言挡不住「答非所问但碰巧含关键词」。给用例写 `judge_criteria`，
+关键词断言挡不住「答非所问但碰巧含关键词」。给用例写 `judge_criteria`，  
 让一个 LLM 按你的标准判分：
 
 ```json
@@ -330,8 +337,8 @@ python3 run_eval.py --level L1
 
 **两条红线**（框架强制）：
 
-1. **judge 必须先过金标校准才上岗**：拿 200+ 条人工标好 pass/fail 的样本跑
-   `calibrate_judge()`，一致率 ≥85% 且 Cohen's κ ≥0.8 才放行。
+1. **judge 必须先过金标校准才上岗**：拿 200+ 条人工标好 pass/fail 的样本跑  
+   `calibrate_judge()`，一致率 ≥85% 且 Cohen's κ ≥0.8 才放行。  
    （κ 修正「碰巧一致」：全判 pass 的懒 judge 一致率虚高，κ≈0 会被拦下。）
 2. **judge 拿不准就输出「需复核」，不硬判**——判分器自己不能成为事故源。
 
@@ -346,7 +353,8 @@ report = BatchRunner(adapter_cls(), judge=judge).run_all(
     cases, level=args.level, context=context, repeat=3)
 ```
 
-同一条用例跑 3 次，全过才算过；时好时坏的会单独标记为 flaky
+
+同一条用例跑 3 次，全过才算过；时好时坏的会单独标记为 flaky  
 （LLM 应用的经典病，宁可错杀不可放过）。
 
 ### 7.4 覆盖审计报告
@@ -355,22 +363,93 @@ report = BatchRunner(adapter_cls(), judge=judge).run_all(
 python3 run_eval.py --coverage     # 产出 coverage.html，浏览器打开
 ```
 
-按业务线/层级展示：哪些场景有用例盖住、哪些没有、没盖的原因（待补数据/
+按业务线/层级展示：哪些场景有用例盖住、哪些没有、没盖的原因（待补数据/  
 范围排除/风险豁免…6 类）、高风险裸奔场景标红线——**给老板看的一页纸**。
+
+### 7.5 让「修过的 bug」不再回来（数据飞轮）
+
+前四节是「怎么测」，这一节是「测完之后怎么让这次失败变成下次的考卷」。
+三个动作，都在命令行里跑，不需要额外平台：
+
+```bash
+# ① 给用例分个类：课程里 demo 的评估集已经带了 dataset 标签
+python3 run_eval.py --dataset smoke        # 只跑冒烟集（3 条，发布前快速过一遍）
+python3 run_eval.py --dataset regression   # 只跑回归集（历史 bug 沉淀在这里）
+
+# ② 跑挂了？把失败样本导出来
+python3 run_eval.py --dataset regression --export-failures failures.json \
+                    --report-json report.json
+```
+
+打开 `failures.json`，你会看到每条失败用例的**实际回答、工具返回值、
+失败断言明细**，以及一份 `suggested_case`（建议的新回归用例草稿，
+自带判分标准）。**必须人工看一眼再决定留不留**——线上那句错误回答
+只是证据，不是标准答案。
+
+```bash
+# ③ 确认后回灌，再改代码重跑，看逐题对比
+python3 run_eval.py --promote-failures failures.json    # 默认另存 .promoted.json，不覆盖原考卷
+python3 run_eval.py --fixed --dataset regression --compare report.json
+```
+
+对比输出长这样：
+
+```
+成功率: 75.0% → 100.0% (+25.0pp)
+逐题变化 1 条:
+  CS-009: passed: False → True, assertion:tool_result_used#2: 'failed' → 'passed'
+性能变化: 平均耗时(ms) 120 → 120 (+0) ｜ Token 合计 1520 → 1520 (+0)
+回放判定: promote｜提升可合并
+```
+
+**两个护栏，记住就不会踩坑**：
+- 报告里带 `env` 指纹。生产跑的报告拿去和预发比，会直接判
+  `invalid 环境不一致`——不同环境的数据混在一起比，得出的结论是假的
+- 回灌默认**另存不覆盖**、id 冲突自动改名、合并后整集重新校验。
+  想原地覆盖要显式加 `--promote-overwrite`
+
+Web 控制台里对应的是「数据集分层」下拉 + 跑批后出现的「失败样本回流」
+面板，勾选后点「回灌到评估集」即可，不用敲命令。
+
+### 7.6 抓「工具调了、结果没用」这类隐形 bug
+
+`must_call` 只能证明工具**被调过**。有这么一类翻车：工具全都成功返回了，
+但主流程没把结果汇总进回答，最后告诉用户「没查到数据」。
+demo 里的 CS-009 就是这个场景，用两个断言抓它：
+
+```json
+"tool_result_used": [{"tool": "query_price", "min_values": 1}],
+"output_grounded_in": {"min_values": 2}
+```
+
+意思是「工具返回的价格必须出现在回答里」「回答里至少要有 2 个来自
+执行证据的值」。想启用，你的 adapter 里给工具调用补一个 `result`：
+
+```python
+ToolCallRecord("query_price", {"model": "pixel 8"}, result={"price": "4599"})
+```
+
+**没补也不报错**：框架会把这类断言标成「跳过未判」，不会让老项目
+一升级就全红。同理，补上 `latency_ms` / `token_usage` 后，
+`--compare` 才会显示「改好了但更慢/更贵」的性能变化。
 
 ---
 
 ## 8. 常见报错急救表
 
-| 报错/现象 | 原因 | 解法 |
-|---|---|---|
-| `ModuleNotFoundError: agent_eval_lib` | 不在项目目录里跑 | `cd` 进你的项目目录再跑；项目需与 `agent_eval/` 保持 demo 的相对位置 |
-| `连接被拒绝 / 超时` | 你的 Agent 服务没起 | 先 `curl` 你的接口确认活着，再跑评测 |
-| `P2 语义判分跳过` 提示 | 没配 `EVAL_MODEL_*` 或 judge 未校准 | L0 不需要管它；要用 P2 就配环境变量并跑校准 |
-| `转人工 / need_review` | judge 拿不准 | 正常设计：人工看一眼这批样本，别硬判 |
-| 端口 8900 被占用 | webui 已在跑 | `pkill -f webui/server.py` 后重启，或改 `server.py` 末尾端口 |
-| 成功率 100% 但线上还是翻车 | 考卷太水 | 回第 6 节：刁钻格和红线格补题；给关键题加 `judge_criteria` |
-| `severity 非法` | 拼错 | 只能是 `blocker` / `major` / `minor` 三个词 |
+| 报错/现象                                 | 原因                            | 解法                                                 |
+| ------------------------------------- | ----------------------------- | -------------------------------------------------- |
+| `ModuleNotFoundError: agent_eval_lib` | 不在项目目录里跑                      | `cd` 进你的项目目录再跑；项目需与 `agent_eval/` 保持 demo 的相对位置    |
+| `连接被拒绝 / 超时`                          | 你的 Agent 服务没起                 | 先 `curl` 你的接口确认活着，再跑评测                             |
+| `P2 语义判分跳过` 提示                        | 没配 `EVAL_MODEL_*` 或 judge 未校准 | L0 不需要管它；要用 P2 就配环境变量并跑校准                          |
+| `转人工 / need_review`                   | judge 拿不准                     | 正常设计：人工看一眼这批样本，别硬判                                 |
+| 端口 8900 被占用                           | webui 已在跑                     | `pkill -f webui/server.py` 后重启，或改 `server.py` 末尾端口 |
+| 成功率 100% 但线上还是翻车                      | 考卷太水                          | 回第 6 节：刁钻格和红线格补题；给关键题加 `judge_criteria`            |
+| `severity 非法`                         | 拼错                            | 只能是 `blocker` / `major` / `minor` 三个词              |
+| `dataset=xxx 过滤后没有用例，拒绝空跑批`      | 标签拼错，或该标签下确实没题          | 检查 `dataset` 拼写；或去掉 `--dataset` 跑全量。拦住是为了防空报告误放行 |
+| `环境不一致…，两份报告不可比较`              | 两份报告 `env` 不同               | 用同一个 `--env` 重跑，别把生产和预发的报告放一起比               |
+| 证据接地断言显示「跳过未判」                  | adapter 没填 `ToolCallRecord.result` | 在 adapter 里把工具返回值填进 `result`，断言才会真正生效           |
+| `--promote-failures` 提示校验失败            | 候选样本里 `judge_criteria` 等字段非法   | 打开 `failures.json` 改掉草稿再回灌；整集校验不过不会落盘          |
 
 ---
 
@@ -387,7 +466,7 @@ GATE_FIXED=1 python3 -m pytest test_gate.py -v   # pytest 形态的同一门禁
 # web 控制台
 cd webui && python3 server.py          # http://127.0.0.1:8900
 
-# 框架自身单测（118 条）
+# 框架自身单测
 python3 -m pytest agent_eval/tests/ -q
 
 # 你的项目
@@ -395,6 +474,10 @@ cd my_project
 python3 run_eval.py --evalset evalset.json --gate
 python3 run_eval.py --level L1         # 加语义判分（需 EVAL_MODEL_*）
 python3 run_eval.py --coverage         # 加覆盖审计报告
+python3 run_eval.py --dataset smoke    # 只跑冒烟集
+python3 run_eval.py --export-failures f.json --report-json r.json  # 导出失败样本 + 报告
+python3 run_eval.py --promote-failures f.json                      # 回灌候选回归用例
+python3 run_eval.py --fixed --compare r.json                      # 与上次报告逐题对比
 ```
 
 ---
@@ -402,7 +485,7 @@ python3 run_eval.py --coverage         # 加覆盖审计报告
 ## 卡住了？
 
 - 看主 [README](../README.md)（完整能力清单）
-- 看 [agent_eval/README.md](../agent_eval/README.md)（模块设计与接入协议）
+- 看 [agent\_eval/README.md](../agent_eval/README.md)（模块设计与接入协议）
 - 直接读 demo：`agent_eval/examples/demo_project/` 里的 4 个文件就是完整答案
 
 祝你的 Agent 永远绿。🌿

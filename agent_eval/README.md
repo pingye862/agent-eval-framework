@@ -9,18 +9,20 @@ agent_eval/
 ├── models.py            数据模型：覆盖单元 / 快照 / 归因层 / 门禁判定
 ├── coverage.py          覆盖账本 + 6 类未覆盖原因 + 覆盖率审计
 ├── attribution.py       归因引擎：三层只认一个主归因 + 链路第一错
-├── judge.py             P2 语义判分 + 金标校准统计（一致率 / Cohen's κ）
-├── harness.py           执行器：P1 断言 + 跑批 + 归因 + 门禁
-├── evalset.py           评估集加载
+├── judge.py             P2 语义判分（带执行证据）+ 金标校准（一致率 / Cohen's κ）
+├── harness.py           执行器：P1 断言（含证据接地）+ 跑批 + 归因 + 门禁
+│                        + 运行指纹 / 失败样本回流 / 逐题报告对比
+├── evalset.py           评估集加载（dataset 分层 + 新断言字段校验）
 ├── replay.py            快照管理 + 单变量回放（3 种情形 + 门禁）
 ├── report.py            覆盖账本可视化（HTML 审计报告）
+├── agent_eval_lib.py    门面，外部项目只 import 它
 ├── tests/
-│   ├── test_attribution.py
-│   ├── test_coverage.py
-│   ├── test_harness.py
-│   └── test_replay.py
+│   ├── test_attribution.py / test_coverage.py / test_harness.py
+│   ├── test_judge.py / test_evalset.py / test_report.py
+│   ├── test_replay.py / test_webui.py
+│   └── test_flywheel.py   数据飞轮增量能力（轨迹证据/回流/分层/性能/接地）
 ├── examples/
-│   └── mock_agent.py    虚构的数码商品导购 Agent（带可控缺陷）
+│   └── demo_project/    虚构的数码导购 Agent（带 4 个可控缺陷，含 Case B 演示）
 └── README.md
 ```
 
@@ -28,12 +30,13 @@ agent_eval/
 
 ```bash
 cd agent_eval
-python -m pytest tests/ -v          # 框架自身单元测试（与 webui 测试合计 118 条）
+python -m pytest tests/ -v          # 框架自身单元测试（与 webui 测试合计 158 条）
 
 # 完整接入示例（推荐先跑这个）
 cd examples/demo_project
-python3 run_eval.py                 # 带缺陷 → 37.5%，门禁红，exit 1
+python3 run_eval.py                 # 带缺陷 → 33.3%，门禁红，exit 1
 python3 run_eval.py --fixed         # 修复缺陷 → 100%，门禁绿，exit 0
+python3 run_eval.py --dataset smoke # 只跑冒烟集（3 条）
 GATE_FIXED=1 python3 -m pytest test_gate.py -v   # pytest 门禁（CI 接入形态）
 ```
 
@@ -52,18 +55,26 @@ class MyAgentAdapter(AgentAdapter):
         return AgentRun(
             query=query,
             final_output=resp["answer"],
-            tool_calls=[ToolCallRecord(name=t["name"], args=t["args"])
+            tool_calls=[ToolCallRecord(name=t["name"], args=t["args"],
+                                      result=t.get("result"))
                         for t in resp["trace"]["tool_calls"]],
             state=my_project.read_mock_state(),       # 副作用后的系统状态
             versions=resp["versions"],                # 模型/prompt/工具描述/KB 四要素
+            latency_ms=resp.get("latency_ms"),        # 可选：性能对比用
+            token_usage=resp.get("token_usage", {}),  # 可选：成本对比用
         )
 ```
 
+`ToolCallRecord.result` 是工具真实返回值。带上它，证据接地断言与
+judge 的证据核验才有数据；不带也能跑，相关能力自动标 skipped。
+
 **第 2 步：准备评估集**（JSON，参考 `evalset.json`）
 
-关键字段：`severity`（blocker 一票否决）、`must_call` / `must_not_call`（轨迹断言）、
-`response_contains`（结果断言）、`state_after`（副作用断言）、`context_overrides`（用例级前置状态）、
-`judge_criteria`（P2 语义判分标准，数组，LLM judge 校准通过后自动执行，详见根目录 README）。
+关键字段：`severity`（blocker 一票否决）、`dataset`（smoke / regression / baseline 分层）、
+`must_call` / `must_not_call`（轨迹断言）、`response_contains`（结果断言）、
+`state_after`（副作用断言）、`context_overrides`（用例级前置状态）、
+`judge_criteria`（P2 语义判分标准）、`tool_result_used` / `output_grounded_in`
+（证据接地断言，见根目录 README）。
 
 **第 3 步：命令行跑批**
 
@@ -84,10 +95,10 @@ python3 run_eval.py --gate --baseline 0.95   # 门禁模式：比基线掉 2pp �
 | 代码 | 作用 |
 |---|---|
 | `agent_eval_lib.py` | 门面，外部项目只 import 它 |
-| `harness.py` | 执行器：AgentAdapter 协议 + P1 断言 + P2 语义判分接入 + 跑批 + 归因 + 门禁判定 |
-| `judge.py` | P2 语义判分：LLM judge + 金标校准（一致率 ≥85% 且 Cohen's κ ≥0.8 才上岗） |
+| `harness.py` | 执行器：AgentAdapter 协议 + P1 断言（含证据接地）+ P2 语义判分接入 + 跑批 + 归因 + 门禁 + 运行指纹 / 失败回流 / 逐题对比 |
+| `judge.py` | P2 语义判分：LLM judge（带执行证据）+ 金标校准（一致率 ≥85% 且 Cohen's κ ≥0.8 才上岗） |
 | `report.py` | 覆盖账本可视化：单文件 HTML 审计报告（按层拆解 / 6 类原因 / 高风险红线） |
-| `evalset.py` | 评估集加载（缺必填字段直接报错，半成品进不了门禁） |
+| `evalset.py` | 评估集加载 + dataset 分层过滤 + 半成品字段直接报错 |
 | `models.py` / `attribution.py` / `replay.py` / `coverage.py` | 方法论内核（见下表） |
 
 ## 核心模块说明

@@ -3,12 +3,14 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from harness import (AgentAdapter, AgentRun, BatchRunner, ToolCallRecord,
-                     gate_decision, write_snapshots, compare_reports,
+                     assert_case, gate_decision, write_snapshots, compare_reports,
                      format_compare)
-from evalset import EvalCase
+from evalset import EvalCase, load_evalset
 
 
 class StubAdapter(AgentAdapter):
@@ -284,6 +286,78 @@ def test_multiturn_turn_level_fail_message():
     o = r.outcomes[0]
     assert not o.passed
     assert any("第 2 轮" in d for d in o.failed_details())
+
+
+@pytest.mark.parametrize("complete", [False, True])
+@pytest.mark.parametrize("scope", ["single", "session", "turn"])
+def test_required_args_must_be_present_on_one_call(complete, scope):
+    matching = ToolCallRecord("run_sql", {"sql": None, **({"table": "t"} if complete else {})})
+    partial = ToolCallRecord("run_sql", {"table": "t"})
+    spec = {"must_call": [{"tool": "run_sql", "required_args": ["sql", "table"]}]}
+    if scope == "single":
+        case = _case(**spec)
+        runs = [AgentRun("q", "ok", [matching, partial])]
+    elif scope == "session":
+        case = _case(turns=[{"query": "补充"}], **spec)
+        runs = [AgentRun("q", "ok", [matching]), AgentRun("补充", "ok", [partial])]
+    else:
+        case = _case(turns=[{"query": "补充", **spec}])
+        runs = [AgentRun("q", "ok"), AgentRun("补充", "ok", [matching, partial])]
+    (result,) = [a for a in assert_case(case, runs) if a.kind == "must_call"]
+    assert result.ok is complete
+    if not complete:
+        assert "缺少参数" in result.detail
+        if scope == "turn":
+            assert "第 2 轮" in result.detail
+
+
+def test_multiturn_tool_assertions_only_inspect_their_own_turn():
+    a = TurnAdapter(reply_by_turn={0: {"tools": ["lookup"]}, 1: {"tools": ["save"]}})
+    case = _turn_case(query="查询", turns=[{
+        "query": "补充", "must_call": [{"tool": "lookup"}, {"tool": "save"}],
+        "must_not_call": [{"tool": "lookup"}, {"tool": "save"}],
+    }])
+    outcome = BatchRunner(a).run_case(case)
+    actual = [(a.kind, a.ok) for a in outcome.assertions if a.kind.startswith("must_")]
+    assert actual == [("must_call", False), ("must_call", True),
+                      ("must_not_call", True), ("must_not_call", False)]
+    assert len(outcome.failed_details()) == 2
+    assert all("第 2 轮" in d for d in outcome.failed_details())
+
+
+@pytest.mark.parametrize("count", [0, 1, 2])
+def test_multiturn_missing_run_fails_without_falling_back(count):
+    case = _case(turns=[{"query": "补充"}, {
+        "query": "确认", "response_contains": ["已查到"],
+        "must_call": [{"tool": "lookup"}], "must_not_call": [{"tool": "save"}],
+    }])
+    runs = [AgentRun(q, "已查到", [ToolCallRecord("lookup")]) for q in ("q", "补充")][:count]
+    (result,) = assert_case(case, runs)
+    assert not result.ok and result.kind == "no_error"
+    assert f"第 {count + 1} 轮" in result.detail
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize(("spec", "bad_field"), [
+    ({"must_call": "lookup"}, "must_call"),
+    ({"must_call": [{}]}, "must_call[0]"),
+    ({"must_not_call": [{"tool": 42}]}, "must_not_call[0]"),
+    ({"must_call": [{"tool": "lookup", "required_args": "sql"}]}, "must_call[0].required_args"),
+    ({"must_call": [{"tool": "lookup", "required_args": [" "]}]}, "must_call[0].required_args"),
+    ({"response_contains": [False]}, "response_contains[0]"),
+])
+def test_evalset_validates_assertions_at_both_scopes(tmp_path, nested, spec, bad_field):
+    item = {"id": "c", "query": "查询", "severity": "major"}
+    if nested:
+        item["turns"] = [{"query": "补充", **spec}]
+        bad_field = f"turns[0].{bad_field}"
+    else:
+        item.update(spec)
+    path = tmp_path / "cases.json"
+    path.write_text(json.dumps([item]), encoding="utf-8")
+    with pytest.raises(ValueError) as err:
+        load_evalset(path)
+    assert bad_field in str(err.value)
 
 
 def test_multiturn_must_call_union():

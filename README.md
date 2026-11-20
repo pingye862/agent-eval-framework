@@ -2,23 +2,30 @@
 
 面向 AI Agent 的批量质量评测工具集：P1 断言跑批、链路第一错归因、四档门禁判定。零第三方依赖（纯 Python 标准库），适配器模式接入任意 Agent（HTTP 服务 / 进程内代码 / Node 桥接）。
 
+**定位边界**：本框架是 **CI 门禁级**的离线评测库（对标 DeepEval 那一侧），
+不是线上观测平台。它刻意不做无侵入探针、Span 树、线上巡检告警——
+这些是 AgentLoop / ARMS 那类平台型方案的事。需要线上 Trace 时，正确姿势是
+**把别家的 OTel / Trace JSON 转成 `AgentRun`**，而不是自己造探针。
+`write_snapshots` 输出的 JSONL 就是两边对接的落点。
+
 ## 它做什么
 
-1. **批量执行**：评估集（JSON 用例）逐条驱动被测 Agent，每次调用采集完整轨迹（`AgentRun`：最终输出、工具调用、副作用状态、版本信息）；支持多轮对话用例（`turns`，轮次级断言）
-2. **P1 断言**：必调/禁调工具（含参数存在性）、输出关键词、状态断言、异常检测，失败带中文明细
-3. **P2 语义判分（LLM judge）**：用例声明 `judge_criteria`（自然语言判分标准），校准过的 judge 在 L1/L2 层级自动判语义达标；判分器故障降级「需复核」不硬判，未校准自动跳过并标注
+1. **批量执行**：评估集（JSON 用例）逐条驱动被测 Agent，每次调用采集完整轨迹（`AgentRun`：最终输出、工具调用**及其返回值**、副作用状态、版本信息、耗时与 Token）；支持多轮对话用例（`turns`，轮次级断言）
+2. **P1 断言**：必调/禁调工具（含参数存在性）、输出关键词、状态断言、异常检测，**以及证据接地断言**（工具返回值是否真的被回答采用），失败带中文明细
+3. **P2 语义判分（LLM judge）**：用例声明 `judge_criteria`（自然语言判分标准），校准过的 judge 在 L1/L2 层级自动判语义达标；**裁判会同时看到 `tool_calls` / 工具返回值 / 召回片段 / 结束状态**，因此能判「结论有没有证据支持」而不只是「回答顺不顺眼」；判分器故障降级「需复核」不硬判，未校准自动跳过并标注
 4. **judge 金标校准**：judge 也是模型，不能裸上岗——对人工金标集先过「一致率 ≥85% 且 Cohen's κ ≥0.8」才准参与门禁
 5. **归因双口径**：链路第一错（按断言链路顺序，定位用）+ 主归因层（按 system > trajectory > component 固定优先级从全部失败断言中选，定责用；语义判分失败归 component）
 6. **门禁判定**：blocker 用例一票否决（不参与百分比稀释）+ 成功率回落基线超阈值拦截
 7. **pass^k 复跑与 flaky 检测**：同一用例复跑 k 次，全过才算过；部分通过自动单列为 flaky
 8. **快照回放**：轨迹自动落 JSONL 快照，`--compare` 对比新旧报告给出四档判定（可合并/不合并/需排查/环境不稳作废）
 9. **覆盖账本可视化**：覆盖单元按层拆解、未覆盖 6 类原因分布、高风险豁免审计红线，一键渲染成单文件 HTML 审计报告
-10. **Web 控制台**：评估集增删改查（含多轮 `turns` / P2 `judge_criteria`）、自定义项目注册（HTTP/Python 适配器）、L0/L1/L2 层级跑批、语义判分统计、一键生成覆盖审计报告（零依赖，纯标准库 HTTP server）
+10. **Web 控制台**：评估集增删改查（含多轮 `turns` / P2 `judge_criteria` / 证据接地断言 / `dataset` 标签）、自定义项目注册（HTTP/Python 适配器）、L0/L1/L2 层级跑批、语义判分统计、一键生成覆盖审计报告（零依赖，纯标准库 HTTP server）
+11. **数据飞轮最小闭环**：`dataset` 分层（smoke / regression / baseline）→ 失败样本导出候选回归用例 → 人工确认后安全回灌 → 逐题 diff 版本对比（含延迟 / Token）→ 运行指纹（run_id / env / 配置签名）保证「可比的报告才放一起比」
 
 ## 目录结构
 
 ```
-agent_eval/               评测框架（9 模块 + 单测 + demo 示例项目）
+agent_eval/               评测框架（核心模块 + 9 组单测 + demo 示例项目）
 webui/                    评测控制台（python3 webui/server.py 启动，默认 8900 端口）
 docs/                     小白上手指南（getting-started-zh.md，10 分钟跑通第一份报告）
 ```
@@ -43,7 +50,37 @@ cd webui && python3 server.py   # http://127.0.0.1:8900
 # （仓库自带一份示例），产出 coverage.html
 ```
 
-单测：`python3 -m pytest agent_eval/tests/ -q`（118 条，含 Web 控制台 API 测试）
+单测：`python3 -m pytest agent_eval/tests/ -q`（158 条，含 Web 控制台 API 与数据飞轮闭环测试）
+
+## 数据飞轮最小闭环：Bad Case → 回归资产
+
+一条线上 Bad Case 不该是「修完就忘」。框架提供离线可跑的最小闭环
+（不需要探针、不需要平台）：
+
+```bash
+# 1) 只跑回归集（评估集里用 dataset 标签分层）
+python3 run_eval.py --dataset regression --env staging \
+    --report-json report.json --export-failures failures.json
+
+# 2) 打开 failures.json，人工确认 suggested_case 里的判分标准草稿
+#    （实际输出只放在 actual 里当证据，绝不会变成新用例的标准答案）
+
+# 3) 回灌：默认另存 <name>.promoted.json，不覆盖原评估集；id 冲突自动避让
+python3 run_eval.py --promote-failures failures.json
+
+# 4) 修复后重跑，与上次报告逐题对比（回答变了什么、断言变了什么、
+#    延迟/Token 涨了多少），并给出四档回放判定
+python3 run_eval.py --fixed --dataset regression --env staging --compare report.json
+```
+
+**三层护栏**：
+- **运行指纹**：每次跑批生成 `run_id` + `env` + `dataset` + `config_sig`（版本四要素哈希）。`compare_reports` 发现环境不一致时**直接判作废**——生产与预发的报告混在一起比是最常见的假结论来源
+- **逐题 diff**：不只看成功率，还列同一用例的 `final_output` / 断言状态 / 工具调用 / 耗时 / Token 变化。用例增删、定义指纹改变或仅一边有指纹时，不给出「提升可合并」判定；建议用新版重新生成基线。
+- **回灌安全**：另存不覆盖、整集 `load_evalset` 校验、临时文件写盘、重复 id 自动加后缀
+
+**渐进接入红线**：证据接地断言（`tool_result_used` / `output_grounded_in`）在
+adapter 没上报工具返回值时一律 `skipped`（审计可见，不参与判定），
+绝不把「不可观测」误判成「Agent 做错了」。老 adapter 不会因为升级框架就全红。
 
 ## 接入自己的 Agent
 
@@ -58,6 +95,18 @@ class MyAdapter(AgentAdapter):
         return AgentRun(query=query, final_output=output,
                         tool_calls=[ToolCallRecord(name=t) for t in tool_calls])
 ```
+
+想让判分更严，把工具返回值也带上（`ToolCallRecord(name, args, result=...)`），
+再补 `latency_ms` / `token_usage`。这样证据接地断言、judge 证据核验、
+版本性能对比才有数据可用；不带也能跑，相关能力自动跳过。
+
+`ToolCallRecord` 三个可选字段：
+
+| 字段 | 用途 |
+|---|---|
+| `result` | 工具真实返回值。证据接地断言与 judge 的证据来源；不填则这两类断言标 skipped |
+| `ok` | 该次调用是否成功（默认 True） |
+| `latency_ms` / `token_usage`（在 `AgentRun` 上） | 端到端耗时与 Token 用量，供 `--compare` 出性能 delta |
 
 两种典型接入方式：
 
@@ -109,6 +158,43 @@ print(eval_report.semantic_stats())     # 实判 / 失败 / 转人工 / 跳过
 判定规则：`pass` 计过；`fail` 语义断言失败（归因 component 层，blocker 照样一票否决）；
 `need_review` / 调用失败 → 自动转人工队列，不硬判污染结果。
 
+**judge 拿到什么**：`【判分标准】+【用户问题】+【Agent 回答】+【执行证据】`。
+执行证据 = 全程工具调用（含返回值）/ 召回片段 / 结束状态，由
+`AgentRun.trace_context()` 自动打包。system prompt 里明确写了
+「工具调用成功不代表任务完成」「回答中的数字、型号、结论若在证据里找不到依据，判 fail」——
+这是为了抓住「工具都成功了、回答却说没数据」这类只在过程里才暴露的问题。
+判定缓存的 key 也纳入了轨迹，同一句回答背后证据不同会重新判，不会串判定。
+
+## 证据接地断言：工具调用成功 ≠ 任务完成
+
+`must_call` 只能证明「调过工具」，证明不了「结果被用了」。两类断言补这个洞：
+
+```json
+{
+  "id": "CS-009",
+  "query": "帮我把 Pixel 8 的价格查询结果汇总一下",
+  "severity": "blocker",
+  "dataset": "regression",
+  "must_call": [{"tool": "query_price"}],
+  "tool_result_used": [{"tool": "query_price", "min_values": 1}],
+  "output_grounded_in": {"min_values": 2,
+                         "sources": ["tool_results", "retrieved"]},
+  "judge_criteria": ["回答必须给出工具返回的具体价格数字，不能只说「已完成查询」"]
+}
+```
+
+| 断言 | 判什么 | 典型场景 |
+|---|---|---|
+| `tool_result_used` | 指定工具的返回值里至少 N 个值出现在回答中 | 子任务结果没回传、文档没重新读取就凭旧上下文作答 |
+| `output_grounded_in` | 回答里至少命中 N 个来自执行证据的值 | 整段结论缺乏证据支撑 |
+
+值匹配会做归一化（`5,999` ↔ `5999`、全角 ↔ 半角、大小写、空白）。
+可用 `values` 显式指定期望值，不填则从工具返回值/召回片段自动抽取。
+**adapter 没上报 `ToolCallRecord.result` 时标 `skipped`**，不硬判。
+
+`dataset` 标签（默认 `regression`）用于分层跑批：`smoke` 冒烟集、
+`regression` 回归集、`baseline` 基准集，也允许自定义值。
+
 ## 覆盖账本可视化
 
 覆盖率不是报个百分数就完事。覆盖账本回答三个审计问题：按层拆（system /
@@ -150,6 +236,7 @@ python3 agent_eval/report.py --spec coverage_spec.json --out coverage.html --tex
 EVAL_MODEL_URL=https://api.deepseek.com/v1/chat/completions
 EVAL_MODEL_NAME=deepseek-chat
 EVAL_MODEL_KEY=<你的 key>
+EVAL_ENV=staging            # 可选：运行指纹里的环境标识；不同环境报告不可比
 ```
 
 **key 只放环境变量，不进代码、不进仓库**（`.gitignore` 已排除 `model_env.sh`）。

@@ -192,6 +192,16 @@
           <option value="L2">L2 · P1 + P2 语义判分（全量）</option>
         </select>
       </div>
+      <div class="field">
+        <label>数据集分层（只跑指定标签的用例）</label>
+        <select id="dataset">
+          <option value="">全部数据集</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>环境标识（生产/预发不可混比）</label>
+        <input type="text" id="env" placeholder="local（留空走 EVAL_ENV）">
+      </div>
       <label class="toggle" id="fixedWrap" style="display:none">
         <input type="checkbox" id="fixed"> 修复缺陷后跑（红→绿演示）
       </label>
@@ -258,6 +268,7 @@
               <option value="minor">minor（体验瑕疵）</option>
             </select></div>
           <div class="field"><label>路由 route（可空）</label><input type="text" id="c_route" placeholder="product_consult / price_query / unanswerable"></div>
+          <div class="field"><label>数据集 dataset</label><input type="text" id="c_dataset" placeholder="smoke / regression / baseline（留空默认 regression）"></div>
           <div class="field"><label>负责人 owner（可空）</label><input type="text" id="c_owner" placeholder="eval-owner"></div>
         </div>
         <div class="field" style="margin-top:10px"><label>测试问题 query（发给被测 Agent 的话）</label>
@@ -276,6 +287,12 @@
           <textarea id="c_turns" rows="3" placeholder='[{"query": "补充：要 256G 的", "response_contains": ["256G"]}]'></textarea></div>
         <div class="field" style="margin-top:10px"><label>P2 语义判分标准 judge_criteria（每行一条，可空）——L1/L2 层级由 LLM judge 判定</label>
           <textarea id="c_judge" rows="2" placeholder="回答必须给出具体机型和价格，不能只说「请稍后」&#10;回答应说明推荐理由，而不是罗列参数"></textarea></div>
+        <div class="grid2" style="margin-top:10px">
+          <div class="field"><label>证据接地 tool_result_used（JSON 数组，可空）——工具返回值必须被回答采用</label>
+            <textarea id="c_resultused" rows="2" placeholder='[{"tool": "query_price", "min_values": 1}]'></textarea></div>
+          <div class="field"><label>证据接地 output_grounded_in（JSON 对象，可空）——回答至少命中 N 个证据值</label>
+            <textarea id="c_grounded" rows="2" placeholder='{"min_values": 2, "sources": ["tool_results", "retrieved"]}'></textarea></div>
+        </div>
         <div style="margin-top:12px;display:flex;gap:10px">
           <button class="btn-primary" id="caseSaveBtn" onclick="saveCase()">保存用例</button>
           <button class="btn-ghost" onclick="closeCaseForm()">取消</button>
@@ -310,6 +327,23 @@
     <div class="stat"><div class="num" id="stBlocker">–</div><div class="lbl">blocker 失败</div></div>
   </div>
   <div class="verinfo" id="verinfo"></div>
+  <div class="verinfo" id="fpinfo"></div>
+
+  <div class="card" id="failCard" style="display:none">
+    <h2>失败样本回流 <span id="failCount" class="mini"></span></h2>
+    <div class="mini" style="margin-bottom:8px">
+      跑批失败用例已存成候选回归样本（webui/failures.json）。勾选要保留的，确认
+      <code>suggested_case</code> 里的判分标准草稿后回灌——实际输出只是证据，不是标准答案。
+    </div>
+    <div id="failList"></div>
+    <div style="margin-top:10px;display:flex;gap:10px;align-items:center">
+      <button class="btn-primary" id="promoteBtn" onclick="promoteFailures()">回灌到评估集</button>
+      <label class="toggle" style="display:flex">
+        <input type="checkbox" id="overwriteFail"> 原地覆盖（默认另存 .promoted.json，更安全）
+      </label>
+      <span class="mini" id="failMsg"></span>
+    </div>
+  </div>
 
   <div class="card">
     <h2>用例结果 <span id="hint" style="font-weight:400;color:var(--muted)">（点击行展开断言明细）</span></h2>
@@ -426,6 +460,10 @@ function caseSummary(c) {
   if ((c.state_after || []).length) parts.push(`状态断言×${c.state_after.length}`);
   if ((c.turns || []).length) parts.push(`多轮×${c.turns.length + 1}`);
   if ((c.judge_criteria || []).length) parts.push(`语义判分×${c.judge_criteria.length}`);
+  if ((c.tool_result_used || []).length) parts.push(`证据接地×${c.tool_result_used.length}`);
+  if (c.output_grounded_in && Object.keys(c.output_grounded_in).length)
+    parts.push('整体接地');
+  if (c.dataset && c.dataset !== 'regression') parts.push(`[${c.dataset}]`);
   return parts.join(' · ') || '—';
 }
 
@@ -467,6 +505,7 @@ function openCaseForm(c) {
   $('c_query').value = c ? c.query : '';
   $('c_sev').value = c ? c.severity : 'major';
   $('c_route').value = c ? (c.route || '') : '';
+  $('c_dataset').value = c ? (c.dataset || 'regression') : 'regression';
   $('c_owner').value = c ? (c.owner || '') : '';
   $('c_contains').value = c ? (c.response_contains || []).join(', ') : '';
   $('c_mustcall').value = c ? (c.must_call || []).map(t => t.tool || t).join(', ') : '';
@@ -476,6 +515,10 @@ function openCaseForm(c) {
   $('c_turns').value = c && (c.turns || []).length
     ? JSON.stringify(c.turns, null, 1) : '';
   $('c_judge').value = c ? (c.judge_criteria || []).join('\n') : '';
+  $('c_resultused').value = c && (c.tool_result_used || []).length
+    ? JSON.stringify(c.tool_result_used, null, 1) : '';
+  $('c_grounded').value = c && c.output_grounded_in && Object.keys(c.output_grounded_in).length
+    ? JSON.stringify(c.output_grounded_in, null, 1) : '';
   $('caseFormWrap').dataset.editId = c ? c.id : '';
   $('caseFormWrap').style.display = 'block';
   $('c_id').focus();
@@ -505,14 +548,28 @@ function parseTurns(text) {
   return arr;
 }
 
+function parseJsonField(text, label, kind) {
+  const t = text.trim();
+  if (!t) return kind === 'array' ? [] : {};
+  const v = JSON.parse(t);                       // 抛错由上层提示
+  const ok = kind === 'array' ? Array.isArray(v)
+                              : (v && typeof v === 'object' && !Array.isArray(v));
+  if (!ok) throw new Error(`${label} 必须是 JSON ${kind === 'array' ? '数组' : '对象'}`);
+  return v;
+}
+
 async function saveCase() {
   const btn = $('caseSaveBtn');
   const editId = $('caseFormWrap').dataset.editId;
-  let state, turns;
+  let state, turns, resultUsed, grounded;
   try { state = parseState($('c_state').value); }
   catch (e) { return cMsg('✗ state_after 格式错误: ' + e.message, false); }
   try { turns = parseTurns($('c_turns').value); }
   catch (e) { return cMsg('✗ turns 格式错误: ' + e.message, false); }
+  try { resultUsed = parseJsonField($('c_resultused').value, 'tool_result_used', 'array'); }
+  catch (e) { return cMsg('✗ tool_result_used 格式错误: ' + e.message, false); }
+  try { grounded = parseJsonField($('c_grounded').value, 'output_grounded_in', 'object'); }
+  catch (e) { return cMsg('✗ output_grounded_in 格式错误: ' + e.message, false); }
   const judge = $('c_judge').value.split('\n').map(s => s.trim()).filter(Boolean);
   const c = {
     ...(EDIT_RAW || {}),          // 未知字段原样保留，编辑不再静默丢数据
@@ -520,6 +577,7 @@ async function saveCase() {
     query: $('c_query').value.trim(),
     severity: $('c_sev').value,
     route: $('c_route').value.trim(),
+    dataset: $('c_dataset').value.trim() || 'regression',
     owner: $('c_owner').value.trim(),
     response_contains: $('c_contains').value.trim(),
     must_call: $('c_mustcall').value.trim(),
@@ -527,6 +585,9 @@ async function saveCase() {
     state_after: state,
     turns,
   };
+  if (resultUsed.length) c.tool_result_used = resultUsed; else delete c.tool_result_used;
+  if (Object.keys(grounded).length) c.output_grounded_in = grounded;
+  else delete c.output_grounded_in;
   if (judge.length) c.judge_criteria = judge; else delete c.judge_criteria;
   btn.disabled = true;
   try {
@@ -635,6 +696,12 @@ function onEvalsetChange() {
   for (const k of meta.adapters) ad.add(new Option(META.adapters[k].label, k));
   ad.disabled = meta.adapters.length === 1;   // 自定义项目一对一，锁定即可
   ad.onchange = onAdapterChange;
+  // 数据集分层下拉：按当前评估集实际标签动态生成
+  const ds = $('dataset'), prev = ds.value;
+  ds.innerHTML = '<option value="">全部数据集</option>';
+  for (const [label, n] of Object.entries(meta.datasets || {}).sort())
+    ds.add(new Option(`${label} — ${n} 条`, label));
+  if (prev && [...ds.options].some(o => o.value === prev)) ds.value = prev;
   onAdapterChange();
 }
 
@@ -669,7 +736,10 @@ async function run() {
         adapter: $('adapter').value,
         fixed: $('fixed').checked,
         baseline: parseFloat($('baseline').value),
-        level: $('level').value
+        level: $('level').value,
+        dataset: $('dataset').value || null,
+        env: $('env').value.trim() || null,
+        export_failures: true
       })
     });
     render(LAST);
@@ -716,6 +786,25 @@ function render(r) {
     $('verinfo').innerHTML = '本次运行版本四要素：' +
       Object.entries(v).map(([k, val]) => `<code>${k}: ${esc(String(val))}</code>`).join('');
   } else { $('verinfo').className = 'verinfo'; }
+
+  // 运行指纹 + 性能指标
+  const fp = r.fingerprint, pf = r.perf;
+  const fpBits = [];
+  if (fp) {
+    $('fpinfo').className = 'verinfo show';
+    fpBits.push(`run_id <code>${esc(fp.run_id)}</code>`);
+    fpBits.push(`env <code>${esc(fp.env)}</code>`);
+    fpBits.push(`dataset <code>${esc(fp.dataset)}</code>`);
+    fpBits.push(`config <code>${esc(fp.config_sig)}</code>`);
+  }
+  if (pf) {
+    if (pf.avg_latency_ms != null) fpBits.push(`平均耗时 <code>${pf.avg_latency_ms}ms</code>`);
+    if (pf.total_tokens != null) fpBits.push(`Token <code>${pf.total_tokens}</code>`);
+  }
+  $('fpinfo').innerHTML = fpBits.length ? '运行指纹：' + fpBits.join(' ｜ ') : '';
+
+  // 失败样本回流
+  renderFailures(r);
 
   // 表格
   $('empty').style.display = 'none';
@@ -780,6 +869,49 @@ function detailRow(c, i) {
 function attributionLabel(v) {
   return { system: '系统层（上下文/召回）', trajectory: '轨迹层（工具选择/顺序）',
            component: '组件层（内部模块）' }[v] || v || '—';
+}
+
+function renderFailures(r) {
+  const list = r.failures || [];
+  const card = $('failCard');
+  if (!list.length) { card.style.display = 'none'; return; }
+  card.style.display = 'block';
+  $('failCount').textContent = `（${list.length} 条待确认）`;
+  $('failMsg').textContent = '';
+  $('failList').innerHTML = list.map((f, i) => `
+    <div class="detail-section" style="margin:6px 0;padding:8px 10px;border:1px solid var(--border);border-radius:8px">
+      <label style="display:flex;gap:8px;align-items:baseline;cursor:pointer">
+        <input type="checkbox" class="fail-pick" data-id="${esc(f.case_id)}" checked>
+        <b>${esc(f.case_id)}</b>
+        <span class="badge ${esc(f.severity)}">${esc(f.severity)}</span>
+        <span class="mini">主归因 ${esc(f.attribution || '—')}</span>
+      </label>
+      <div class="mini" style="margin:4px 0 0 22px">${esc(f.query)}</div>
+      <div class="mini" style="margin:4px 0 0 22px;color:var(--red)">
+        ${esc((f.failed_assertions || []).map(a => `[${a.kind}] ${a.detail}`).join('；').slice(0, 220))}
+      </div>
+      <div class="mini" style="margin:4px 0 0 22px">
+        建议标准：${esc((f.suggested_case.judge_criteria || []).join(' / ').slice(0, 180)) || '（无）'}
+      </div>
+    </div>`).join('');
+}
+
+async function promoteFailures() {
+  const ids = [...document.querySelectorAll('.fail-pick:checked')].map(x => x.dataset.id);
+  if (!ids.length) { $('failMsg').textContent = '✗ 至少勾选一条'; return; }
+  const meta = META.evalsets[$('evalset').value];
+  const btn = $('promoteBtn');
+  btn.disabled = true; btn.textContent = '回灌中…';
+  try {
+    const j = await api('/api/failures/promote', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: meta.path, ids,
+                             overwrite: $('overwriteFail').checked })
+    });
+    $('failMsg').textContent = `✓ 已回灌 ${j.added} 条 → ${j.out}`;
+    await refreshMeta($('evalset').value);
+  } catch (e) { $('failMsg').textContent = '✗ ' + e.message; }
+  btn.disabled = false; btn.textContent = '回灌到评估集';
 }
 
 function copyReport() {

@@ -174,3 +174,70 @@ def test_scoped_adapters_isolated_in_concurrent_batches():
 def test_demo_health_returns_true():
     """进程内 demo 探活恒绿（此前 .health() 直接 AttributeError）。"""
     assert server.build_adapter("demo", fixed=True).health() is True
+
+
+# ---------- 数据飞轮增量：报告指纹 / 失败回流 / 数据集 ----------
+
+def test_serialize_report_exposes_fingerprint_and_perf():
+    from harness import ToolCallRecord
+    class PerfAdapter(server.AgentAdapter):
+        def run(self, query, context):
+            return server.AgentRun(query=query, final_output="ok",
+                                   latency_ms=100.0,
+                                   token_usage={"total": 20},
+                                   tool_calls=[ToolCallRecord("t", result="V1")])
+    c = EvalCase(case_id="c1", query="q", severity="major", dataset="smoke")
+    r = BatchRunner(PerfAdapter()).run_all([c], dataset="smoke", env="staging")
+    d = server.serialize_report(r, True, [], 1.0)
+    assert d["fingerprint"]["env"] == "staging"
+    assert d["fingerprint"]["dataset"] == "smoke" and d["fingerprint"]["run_id"]
+    assert d["perf"]["total_tokens"] == 20
+    assert d["cases"][0]["tool_results"] == ["V1"]
+    assert d["cases"][0]["dataset"] == "smoke"
+
+
+def test_serialize_failures_are_candidates_not_answers():
+    class BadAdapter(server.AgentAdapter):
+        def run(self, query, context):
+            return server.AgentRun(query=query, final_output="错误答案")
+    c = EvalCase(case_id="c1", query="q", severity="blocker",
+                 response_contains=["正确"])
+    r = BatchRunner(BadAdapter()).run_all([c])
+    from harness import collect_failures
+    f = collect_failures(r)[0]
+    assert f["suggested_case"]["id"] == "REG-c1"
+    # 实际输出只进 actual（证据），绝不能变成新用例的 response_contains
+    assert "错误答案" not in json.dumps(f["suggested_case"], ensure_ascii=False)
+
+
+def test_safe_datasets_handles_bad_path():
+    assert server._safe_datasets("/definitely/not/here.json") == {}
+
+
+def test_promote_endpoint_rejects_unregistered_path(tmp_path):
+    """回灌端点走评估集路径白名单，任意文件写入被拒绝。"""
+    import harness
+    fake = tmp_path / "f.json"
+    src = tmp_path / "e.json"
+    src.write_text("[]", encoding="utf-8")
+    fake.write_text(json.dumps([{"case_id": "x", "suggested_case": {
+        "id": "REG-x", "query": "q", "severity": "major"}}], ensure_ascii=False),
+        encoding="utf-8")
+    with pytest.raises(ValueError, match="未注册"):
+        server.resolve_evalset_path(str(src))
+    # 直接调库函数仍可用（CLI 走这条），端点层才做白名单
+    out, n = harness.promote_failures(fake, src)
+    assert n == 1 and out.name == "e.promoted.json"
+
+
+def test_validate_case_keeps_flywheel_fields():
+    """用例编辑表单不能静默丢掉 dataset / 证据接地字段（历史上出过这个 bug）。"""
+    c = server._validate_case({
+        "id": "c1", "query": "q", "severity": "major",
+        "dataset": "baseline",
+        "tool_result_used": [{"tool": "t", "min_values": 1}],
+        "output_grounded_in": {"min_values": 2},
+    }, [])
+    assert c["dataset"] == "baseline"
+    assert c["tool_result_used"] == [{"tool": "t", "min_values": 1}]
+    assert c["output_grounded_in"] == {"min_values": 2}

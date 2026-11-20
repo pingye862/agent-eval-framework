@@ -104,12 +104,34 @@ def test_judge_prompt_contains_criteria_query_output():
     assert c.calls[0]["system"] == JUDGE_SYSTEM_PROMPT
 
 
+def test_judge_renders_dialogue_separately_from_truncated_execution_evidence():
+    c = FakeClient(reply='{"verdict": "pass", "evidence": []}')
+    j = SemanticJudge(client=c)
+    first_answer = "历史回答：" + "甲" * 3100 + "历史尾部"
+    j.judge("首轮提问", ["须沿用前轮结果"], "末轮答复", trace={
+        "retrieved": ["工具证据开头" + "乙" * 3100 + "工具证据尾部"],
+        "turns": [{"query": "首轮提问", "final_output": first_answer},
+                  {"query": "末轮追问", "final_output": "末轮答复"}],
+    })
+    target, rest = c.calls[0]["user"].split("【多轮对话】", 1)
+    dialogue, evidence = rest.split("【执行证据】", 1)
+    assert "【末轮用户问题】\n末轮追问" in target
+    assert "【末轮 Agent 回答】\n末轮答复" in target
+    assert f"第 1 轮\n用户问题：首轮提问\nAgent 回答：{first_answer}" in dialogue
+    assert "第 2 轮\n用户问题：末轮追问\nAgent 回答：末轮答复" in dialogue
+    assert dialogue.index("第 1 轮") < dialogue.index("第 2 轮")
+    assert '"turns"' not in evidence and "历史尾部" not in evidence
+    assert "工具证据开头" in evidence and "工具证据尾部" not in evidence
+    assert evidence.endswith("…（已截断）")
+
+
 # ---------- 校准 ----------
 
 def test_calibrate_passes_on_perfect_labels():
     human = ["pass"] * 180 + ["fail"] * 20
     rep = calibrate_judge(list(human), human)
     assert rep.qualified and rep.agreement == 1.0 and rep.kappa == 1.0
+    assert rep.need_review_count == 0 and rep.need_review_rate == 0.0
 
 
 def test_calibrate_chance_agreement_fails_kappa_gate():
@@ -128,12 +150,31 @@ def test_calibrate_below_agreement_gate_not_qualified():
     assert not rep.qualified and rep.agreement == 0.8
 
 
-def test_calibrate_need_review_counts_as_mismatch():
-    human = ["pass"] * 200
-    machine = ["pass"] * 199 + ["need_review"]
+def test_calibrate_need_review_is_a_separate_category():
+    human = ["pass"] * 150 + ["fail"] * 50
+    machine = ["pass"] * 150 + ["fail"] * 30 + ["need_review"] * 20
     rep = calibrate_judge(machine, human)
-    assert rep.agreement == pytest.approx(0.995)   # need_review 按不一致计
-    assert rep.pass_agreement                       # 但仍高于 85% 门槛
+    # 观测一致率 0.9，随机一致率为 0.75×0.75 + 0.15×0.25 = 0.6。
+    assert rep.agreement == 0.9 and rep.kappa == 0.75
+    assert rep.need_review_count == 20 and rep.need_review_rate == 0.1
+    assert rep.pass_agreement and not rep.pass_kappa and not rep.qualified
+
+
+def test_calibrate_all_need_review_stays_in_denominator():
+    rep = calibrate_judge(["need_review"] * 200, ["fail"] * 200)
+    assert rep.n == 200 and rep.need_review_count == 200 and rep.need_review_rate == 1.0
+    assert rep.agreement == 0.0 and rep.kappa == 0.0 and not rep.qualified
+
+
+@pytest.mark.parametrize(("machine", "human", "side"), [
+    ("unknown", "fail", "machine"),
+    (None, "fail", "machine"),
+    ("pass", "need_review", "human"),
+    ("pass", "FAIL", "human"),
+])
+def test_calibrate_rejects_invalid_labels(machine, human, side):
+    with pytest.raises(ValueError, match=rf"{side}\[0\] 标签非法"):
+        calibrate_judge([machine], [human], min_samples=1)
 
 
 def test_calibrate_rejects_small_goldset():
@@ -264,6 +305,28 @@ def test_judge_cache_does_not_hide_different_output():
     j.judge("q", ["标准"], "回答A")
     j.judge("q", ["标准"], "回答B")
     assert len(c.calls) == 2
+
+
+def test_judge_cache_distinguishes_earlier_turns_with_identical_final_answer():
+    class MultiTurnAdapter(AgentAdapter):
+        def run(self, query, context):
+            output = context["first_answer"] if query == "首轮提问" else "相同末轮答复"
+            return AgentRun(query=query, final_output=output)
+
+    c = FakeClient(reply='{"verdict": "pass", "evidence": []}')
+    runner = BatchRunner(MultiTurnAdapter(), judge=SemanticJudge(client=c, calibrated=True))
+    case = EvalCase(case_id="multi", severity="major", query="首轮提问",
+                    turns=[{"query": "末轮追问"}], judge_criteria=["须沿用前轮结果"])
+
+    runner.run_case(case, {"first_answer": "首轮回答 A"}, level="L1")
+    runner.run_case(case, {"first_answer": "首轮回答 A"}, level="L1")
+    assert len(c.calls) == 1
+    c.reply = '{"verdict": "fail", "evidence": ["未沿用前轮结果"]}'
+    outcome = runner.run_case(case, {"first_answer": "首轮回答 B"}, level="L1")
+    assert len(c.calls) == 2
+    assert "首轮回答 A" in c.calls[0]["user"] and "首轮回答 B" in c.calls[1]["user"]
+    assert all("【末轮用户问题】\n末轮追问" in call["user"] for call in c.calls)
+    assert not outcome.passed
 
 
 def test_judge_need_review_not_cached():
