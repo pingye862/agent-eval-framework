@@ -27,7 +27,7 @@
 ```
 agent_eval/               评测框架（核心模块 + 单测 + demo 示例 + 通用案例库）
 webui/                    评测控制台（python3 webui/server.py 启动，默认 8900 端口）
-docs/                     小白上手指南（getting-started-zh.md，10 分钟跑通第一份报告）
+docs/                     小白上手指南（getting-started-zh.md）+ 测试清单（test-inventory.md）
 ```
 
 **模块定位（重要）**：主链路是 `harness.py`（P1 断言 + 批量执行 + 归因 + 门禁）与
@@ -56,7 +56,7 @@ cd webui && python3 server.py   # http://127.0.0.1:8900
 cd agent_eval/examples/universal_cases && python3 run_eval.py -v
 ```
 
-单测：`python3 -m pytest agent_eval/tests/ -q`（230 条，含 Web 控制台 API、数据飞轮闭环与门禁可靠性回归；数字以 `--collect-only` 为准）
+单测：`python3 -m pytest agent_eval/tests/ -q`（230 条，含 Web 控制台 API、数据飞轮闭环与门禁可靠性回归；数字以 `--collect-only` 为准）。每条用例验证什么，见 [docs/test-inventory.md](docs/test-inventory.md)。
 
 ## 通用案例库：一套用例跑任何系统
 
