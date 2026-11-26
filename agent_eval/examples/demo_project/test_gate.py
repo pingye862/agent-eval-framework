@@ -31,8 +31,22 @@ def test_case(case):
 
 
 def test_gate_overall():
-    """整卷判定：blocker 全过 + 成功率达标。真实项目里 baseline 从
-    上次通过的门禁结果文件读取（如 .gate_baseline.json）。"""
+    """整卷判定：blocker 全过 + 成功率达标 + 零漏审签核齐备。
+
+    真实项目里 baseline 从上次通过的门禁结果文件读取（如 .gate_baseline.json），
+    签核文件也必须由人工产出（--export-review 导出后逐条确认），
+    下面自动 approve 仅用于让 GATE_FIXED=1 的演示能变绿，不可照搬到 CI。
+    """
+    from agent_eval_lib import ReviewSignoff, SignoffSet, review_fingerprint
     report = RUNNER.run_all(CASES, level="L0")
-    ok, reasons = gate_decision(report, baseline_rate=None)
+    queue = report.review_queue()
+    if queue:
+        ok_pending, reasons_pending = gate_decision(report, baseline_rate=None)
+        assert not ok_pending
+        assert any("零漏审" in r for r in reasons_pending)
+    signoffs = SignoffSet([
+        ReviewSignoff(o.case.case_id, review_fingerprint(o), "approve", "ci-demo")
+        for o in queue
+    ])
+    ok, reasons = gate_decision(report, baseline_rate=None, signoffs=signoffs)
     assert ok, "；".join(reasons)

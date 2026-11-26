@@ -34,13 +34,26 @@ def _run(path=FULL, dataset=None):
 
 
 def test_full_evalset_runs_all_green():
+    """通过率口径全绿，但零漏审仍要求人工确认未判项。
+
+    UC-011 只配了 P1 关键词 + judge_criteria；L0 无 judge，语义标准未判
+    （skipped）。旧口径把这条算作「全绿」，新口径必须进审核队列并签核后才能放行。
+    """
+    from agent_eval_lib import (ReviewSignoff, SignoffSet,
+                                review_fingerprint)
     report = _run()
     assert report.total == 11
     assert report.undetermined_total == 0
     assert report.passed == 11
     assert report.success_rate == 1.0
+    assert [o.case.case_id for o in report.review_queue()] == ["UC-011"]
     ok, reasons = gate_decision(report)
-    assert ok, reasons
+    assert not ok and any("UC-011" in r for r in reasons)
+    o = report.review_queue()[0]
+    signoffs = SignoffSet([ReviewSignoff("UC-011", review_fingerprint(o),
+                                         "approve", "selfcheck")])
+    ok2, reasons2 = gate_decision(report, signoffs=signoffs)
+    assert ok2, reasons2
 
 
 def test_every_case_carries_a_real_assertion():

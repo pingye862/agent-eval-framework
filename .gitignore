@@ -17,3 +17,6 @@ webui/evalsets/*.json.tmp
 webui/coverage.html
 webui/snapshots/
 *.log
+
+# macOS 系统文件
+.DS_Store

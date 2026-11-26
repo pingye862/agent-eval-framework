@@ -55,8 +55,12 @@ def test_gate_rejects_blocker_undetermined():
     assert any("未有效测试" in x for x in reasons)
 
 
-def test_non_blocker_undetermined_only_annotated():
-    """非 blocker 的 undetermined 只标注、不阻断；通过率分母只算有效判定。"""
+def test_non_blocker_undetermined_blocks_gate_under_zero_miss():
+    """零漏审口径：非 blocker 的不确定用例同样阻断门禁，不区分 severity。
+
+    通过率分母口径保持不变（undetermined 仍不计入）；变的是放行条件 ——
+    历史行为「只标注不阻断」已收敛为显式 strict_review=False 的兼容开关。
+    """
     cases = [
         _case("m1", judge_criteria=["x"]),
         _case("ok", response_contains=["ok"]),
@@ -64,9 +68,13 @@ def test_non_blocker_undetermined_only_annotated():
     r = BatchRunner(StubAdapter()).run_all(cases, level="L1")
     assert r.undetermined_total == 1 and r.determined_total == 1
     assert r.passed == 1 and r.success_rate == 1.0
+    assert [x.case.case_id for x in r.review_queue()] == ["m1"]
     ok, reasons = gate_decision(r)
-    assert ok is True and reasons == []
+    assert ok is False
+    assert any("零漏审" in x and "m1" in x for x in reasons)
     assert "未定 1 条" in r.text()
+    ok_legacy, reasons_legacy = gate_decision(r, strict_review=False)
+    assert ok_legacy is True and reasons_legacy == []
 
 
 def test_need_review_case_excluded_from_rate():
@@ -88,11 +96,16 @@ def test_need_review_case_excluded_from_rate():
 
 
 def test_mixed_skipped_with_effective_assertion_still_passed():
-    """有有效断言时，被跳过的语义断言只标注不阻断（B 组「其余仅标注」）。"""
+    """有有效断言时 case_status 仍为 passed，但零漏审下必须进人工审核队列。
+
+    这正是旧口径的漏审点：P1 全过会把 skipped 的语义断言掩盖掉。
+    """
     c = _case(response_contains=["ok"], judge_criteria=["x"])
     o = BatchRunner(StubAdapter()).run_case(c, level="L1")
     assert o.unverified and o.effective
     assert o.case_status == "passed" and o.passed is True
+    assert o.review_required is True
+    assert any("semantic:skipped" in x for x in o.review_reasons)
 
 
 def test_case_status_three_states():

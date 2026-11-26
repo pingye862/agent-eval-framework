@@ -472,6 +472,21 @@ class CaseOutcome:
                 if a.result_status() in ("skipped", "need_review")]
 
     @property
+    def review_reasons(self) -> list[str]:
+        """零漏审口径：本条用例的全部不确定信号。
+
+        与 case_status 解耦 —— 即便 P1 断言全过、case_status 判 passed，
+        只要存在 skipped / need_review / flaky / undetermined，就必须人工确认。
+        """
+        from review import review_reasons as _collect
+        return _collect(self)
+
+    @property
+    def review_required(self) -> bool:
+        """是否需要人工审核。空 = 全自动判定完毕，可放行。"""
+        return bool(self.review_reasons)
+
+    @property
     def effective(self) -> list[AssertionResult]:
         """真正参与判定的断言。no_error 是结构性占位（Agent 跑通），不算判分依据。"""
         return [a for a in self.assertions
@@ -619,10 +634,21 @@ class EvalReport:
         return stats
 
     def review_cases(self) -> list[CaseOutcome]:
-        """judge 转人工的用例（不硬判，但审计必须看得见）。"""
+        """judge 转人工的用例（不硬判，但审计必须看得见）。
+
+        历史口径：只收 semantic + need_review。零漏审请用 review_queue()。
+        """
         return [o for o in self.outcomes
                 if any(a.kind == "semantic" and a.result_status() == "need_review"
                        for a in o.assertions)]
+
+    def review_queue(self) -> list[CaseOutcome]:
+        """零漏审审核队列：所有不确定用例，不区分 severity、不被有效断言掩盖。
+
+        覆盖 skipped（judge 未校准 / 证据未上报）、need_review（judge 弃判）、
+        undetermined（无有效断言）、flaky（复跑结果不一致）四类信号。
+        """
+        return [o for o in self.outcomes if o.review_required]
 
     def versions_summary(self) -> dict:
         """版本四要素汇总，供报告留档与版本对比。
@@ -877,11 +903,19 @@ def _failed_outcome(case: EvalCase, message: str) -> CaseOutcome:
 
 
 def gate_decision(report: EvalReport, baseline_rate: Optional[float] = None,
-                  drop_pp: float = 2.0) -> tuple[bool, list[str]]:
+                  drop_pp: float = 2.0, strict_review: bool = True,
+                  signoffs=None) -> tuple[bool, list[str]]:
     """返回 (是否放行, 触发的规则列表)。blocker 一票否决，不参与百分比稀释。
 
+    零漏审（strict_review=True，默认）：任何不确定用例未完成人工签核，
+    一律拒绝放行，不区分 severity、不被有效断言掩盖。签核由
+    review.load_signoffs() 提供且绑定内容指纹 —— 输出或轨迹变化后旧签核失效。
+
     纵深防御：空报告、全部用例未有效测试（undetermined）、blocker 未测，
-    都不能当作绿灯放行。其余 undetermined 只标注、不阻断。
+    都不能当作绿灯放行。
+
+    兼容口径：strict_review=False 回到历史行为（其余 undetermined 只标注、
+    不阻断）。仅用于本地演示与回归对照，生产门禁不应关闭。
     """
     if report.total == 0:
         return False, ["空报告（0 条用例），拒绝放行"]
@@ -896,6 +930,19 @@ def gate_decision(report: EvalReport, baseline_rate: Optional[float] = None,
     if blocked:
         reasons.append(f"blocker 样本失败 {len(blocked)} 条: "
                        f"{[o.case.case_id for o in blocked]}")
+    if strict_review:
+        from review import review_fingerprint
+        pending: list[tuple[str, str]] = []
+        for o in report.review_queue():
+            fp = review_fingerprint(o)
+            status = (signoffs.status(o.case.case_id, fp)
+                      if signoffs is not None else "pending")
+            if status != "approve":
+                pending.append((o.case.case_id, status))
+        if pending:
+            detail = ", ".join(f"{cid}[{st}]" for cid, st in pending)
+            reasons.append(f"零漏审：{len(pending)} 条不确定用例未完成人工确认"
+                           f"（未签核/已驳回）: {detail}")
     if baseline_rate is not None:
         drop = (baseline_rate - report.success_rate) * 100
         if drop > drop_pp:
@@ -936,6 +983,7 @@ def report_to_dict(report: EvalReport, gate_ok: bool | None = None,
 
     逐题 diff 依赖这里输出 final_output / tool_calls / latency / token 全字段。
     """
+    from review import review_fingerprint
     cases = []
     for o in report.outcomes:
         last = _last_run_of(o)
@@ -954,6 +1002,10 @@ def report_to_dict(report: EvalReport, gate_ok: bool | None = None,
             "pass_runs": o.pass_runs,
             "total_runs": o.total_runs,
             "flaky": o.flaky,
+            "review_required": o.review_required,
+            "review_reasons": o.review_reasons,
+            "review_fingerprint": (review_fingerprint(o)
+                                   if o.review_required else ""),
             "assertions": [
                 {"kind": a.kind, "ok": a.ok, "detail": a.detail,
                  "layer": a.layer.value, "skipped": a.skipped,
@@ -991,6 +1043,9 @@ def report_to_dict(report: EvalReport, gate_ok: bool | None = None,
         "perf": report.perf_summary(),
         "text_report": report.text(),
         "semantic_stats": report.semantic_stats(),
+        "review_total": len(report.review_queue()),
+        "review_queue": [o.case.case_id for o in report.review_queue()],
+        "review_cases": [o.case.case_id for o in report.review_cases()],
         "cases": cases,
     }
     if gate_ok is not None:

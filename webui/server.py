@@ -8,7 +8,10 @@ API：
     GET  /api/meta             评估集与适配器清单（含 dataset 标签分布）
     GET  /api/health?adapter=  检测某适配器是否在线（HTTP 型被测对象用）
     POST /api/run              跑批：{evalset, adapter, fixed, baseline, level,
-                                dataset, env, export_failures}
+                                dataset, env, export_failures, signoffs_path}
+                                零漏审默认开启；signoffs_path 指向控制台目录下
+                                已人工签核的审核队列 JSON（也可用环境变量
+                                AGENT_EVAL_SIGNOFFS 指定）
     GET  /api/cases?path=      读评估集全部用例（path 必须已注册）
     POST /api/cases            新增用例：{path, case}
     PUT  /api/cases            更新用例：{path, id, case}
@@ -46,6 +49,7 @@ from harness import (BatchRunner, gate_decision, write_snapshots,   # noqa: E402
                      promote_failures)
 from judge import load_judge_from_env                # noqa: E402
 from report import build_ledger, render_coverage_html  # noqa: E402
+from review import (build_review_queue, load_signoffs, review_stats)  # noqa: E402
 
 
 def _load_module(name: str, path: Path):
@@ -585,6 +589,16 @@ class Handler(BaseHTTPRequestHandler):
                                     or not re.match(r"^[\w.-]{1,32}$", env)):
                 raise ValueError("env 只能是 1~32 位字母/数字/下划线/连字符/点")
             export_failures_flag = bool(body.get("export_failures", False))
+            # 零漏审签核：只允许控制台目录下的文件名，避免任意路径读取。
+            signoffs_name = (body.get("signoffs_path")
+                             or os.environ.get("AGENT_EVAL_SIGNOFFS"))
+            signoffs = None
+            if signoffs_name:
+                sp = Path(signoffs_name)
+                if sp.is_absolute() or ".." in sp.parts:
+                    raise ValueError("signoffs_path 只能是控制台目录下的文件名")
+                sp = WEBUI_DIR / sp
+                signoffs = load_signoffs(sp) if sp.is_file() else None
             if level not in ("L0", "L1", "L2"):
                 raise ValueError("level 只能是 L0 / L1 / L2")
         except Exception as e:                            # noqa: BLE001
@@ -645,10 +659,15 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:                                 # noqa: BLE001
             pass                                          # 快照失败不阻塞跑批结果
 
-        gate_ok, reasons = gate_decision(report, baseline_rate=baseline)
+        gate_ok, reasons = gate_decision(report, baseline_rate=baseline,
+                                         signoffs=signoffs)
         payload = serialize_report(report, gate_ok, reasons, baseline)
         payload["level"] = level
         payload["judge_note"] = judge_note
+        # 零漏审：把完整待审队列交给前端，未签核项已在门禁理由里点名。
+        # 不自动落盘，避免覆盖人工已填写的签核文件。
+        payload["review_queue"] = build_review_queue(report, signoffs)
+        payload["review_stats"] = review_stats(payload["review_queue"])
         # 失败样本回流：跑完就能把 Bad Case 导成候选回归样本，
         # 人工确认后经 /api/failures/promote 回灌评估集（闭环第 5 环）
         payload["failures"] = collect_failures(report)

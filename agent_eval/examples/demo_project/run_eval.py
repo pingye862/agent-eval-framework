@@ -12,6 +12,11 @@
     python3 run_eval.py --compare old.json           # 与上次报告逐题对比
     python3 run_eval.py --export-failures f.json     # 导出失败样本（候选回归用例）
     python3 run_eval.py --promote-failures f.json    # 人工确认后回灌评估集
+    python3 run_eval.py --export-review q.json       # 导出零漏审人工审核队列
+    python3 run_eval.py --signoffs q.json            # 用已签核的队列跑门禁
+
+零漏审默认开启：凡 skipped / need_review / undetermined / flaky 的用例，
+必须在审核队列里填写 decision=approve|reject + reviewer 后才能放行。
 """
 import sys
 import os
@@ -23,7 +28,9 @@ from agent_eval_lib import (BatchRunner, gate_decision, load_evalset,
                             load_judge_from_env, build_ledger,
                             render_coverage_html, render_coverage_text,
                             report_to_dict, compare_reports, format_compare,
-                            export_failures, promote_failures)
+                            export_failures, promote_failures,
+                            export_review_queue, load_signoffs,
+                            build_review_queue, review_stats)
 
 HERE = os.path.dirname(__file__)
 
@@ -56,6 +63,12 @@ def main() -> int:
                     help="把确认过的失败样本回灌评估集（默认另存 .promoted.json）")
     ap.add_argument("--promote-overwrite", action="store_true",
                     help="配合 --promote-failures：原地覆盖评估集（默认关闭，更安全）")
+    ap.add_argument("--export-review", default=None,
+                    help="导出零漏审人工审核队列 JSON（填写 decision/reviewer 后作为签核回读）")
+    ap.add_argument("--signoffs", default=None,
+                    help="已人工签核的审核队列 JSON 路径；未签核项将阻断门禁")
+    ap.add_argument("--no-strict-review", action="store_true",
+                    help="关闭零漏审门禁（仅本地演示/回归对照，生产禁用）")
     args = ap.parse_args()
 
     if args.promote_failures:
@@ -99,7 +112,17 @@ def main() -> int:
         else:
             print(f"\n（未找到 {spec}，跳过覆盖账本）")
 
-    ok, reasons = gate_decision(report, baseline_rate=args.baseline)
+    signoffs = load_signoffs(args.signoffs) if args.signoffs else None
+    queue = build_review_queue(report, signoffs)
+    if queue:
+        stats = review_stats(queue)
+        print(f"\n[零漏审] 待人工确认 {stats['total']} 条："
+              f"未签核 {stats['pending']} / 通过 {stats['approve']} / 驳回 {stats['reject']}")
+        if args.no_strict_review:
+            print("⚠ 已关闭零漏审门禁，上述未确认项不会阻断放行（生产禁用）")
+    ok, reasons = gate_decision(report, baseline_rate=args.baseline,
+                                strict_review=not args.no_strict_review,
+                                signoffs=signoffs)
     if args.gate:
         print("\n[门禁模式] 下方判定直接决定进程退出码：0 放行 / 1 拦截")
     print("\n门禁判定:", "✅ 放行合并" if ok else "⛔ 拦截合并")
@@ -125,6 +148,12 @@ def main() -> int:
         print(f"失败样本已导出 {n} 条 → {args.export_failures}")
         if n:
             print("人工确认 suggested_case 后用 --promote-failures 回灌评估集")
+    if args.export_review:
+        n = export_review_queue(args.export_review, report, signoffs)
+        print(f"人工审核队列已导出 {n} 条 → {args.export_review}")
+        if n:
+            print("逐条填写 decision=approve|reject、reviewer、note 后，"
+                  "用 --signoffs 回读；未签核项一律阻断门禁")
     return 0 if ok else 1
 
 

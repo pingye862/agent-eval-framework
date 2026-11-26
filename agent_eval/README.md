@@ -99,6 +99,7 @@ python3 run_eval.py --gate --baseline 0.95   # 门禁模式：比基线掉 2pp �
 | `agent_eval_lib.py` | 门面，外部项目只 import 它 |
 | `harness.py` | 执行器：AgentAdapter 协议 + P1 断言（含证据接地）+ P2 语义判分接入 + 跑批 + 归因 + 门禁 + 运行指纹 / 失败回流 / 逐题对比 |
 | `judge.py` | P2 语义判分：LLM judge（带执行证据）+ 金标校准（一致率 ≥85% 且 Cohen's κ ≥0.8 才上岗） |
+| `review.py` | 零漏审：人工审核队列 + 签核闭环 + 内容指纹（未签核不放行） |
 | `report.py` | 覆盖账本可视化：单文件 HTML 审计报告（按层拆解 / 6 类原因 / 高风险红线） |
 | `evalset.py` | 评估集加载 + dataset 分层过滤 + 半成品字段直接报错 |
 | `models.py` / `attribution.py` / `replay.py` / `coverage.py` | 方法论内核（见下表） |

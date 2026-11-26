@@ -235,12 +235,49 @@ print(eval_report.semantic_stats())     # 实判 / 失败 / 转人工 / 跳过
 跳过（judge 未配置或未校准、返回 `need_review`、adapter 未上报工具返回值），
 它**不计入通过率的分子与分母**，报告单列 `undetermined_total` /
 `determined_total` / `undetermined_cases`。其中 **blocker 未有效测试时门禁
-直接拒绝放行**——绿灯里不允许混着没真正测过的用例。其余未定用例只标注、
-不阻断。空报告（0 条用例）与全部未定的报告同样拒绝放行。
+直接拒绝放行**——绿灯里不允许混着没真正测过的用例。空报告（0 条用例）与
+全部未定的报告同样拒绝放行。
 
 > **升级提示**：从旧版本升级后，若评估集中存在「只写 `judge_criteria`、
 > 没有任何 P1 断言」的 blocker 用例，在 judge 未上岗时会由「放行」变为
 > 「未定 → 拦截」。这是预期的语义修正，请为这类用例补至少一条 P1 断言。
+
+### 零漏审：所有不确定项必须人工确认
+
+通过率 100% 不等于「没有问题」：一条用例可能 P1 断言全过，但语义标准从未
+判过。零漏审（默认开启）把「不确定」从报告里的一个数字，变成门禁的硬性
+阻断条件——**不区分 `severity`，也不被有效断言掩盖**。
+
+四类不确定信号全部进入人工审核队列：
+
+| 信号 | 典型来源 |
+|---|---|
+| `skipped` | judge 未配置 / 未校准、adapter 未上报工具返回值 |
+| `need_review` | judge 证据不足、返回非法 verdict、调用异常降级 |
+| `undetermined` | 用例没有任何有效断言 |
+| `flaky` | 复跑结果不一致 |
+
+闭环三步：
+
+```bash
+# 1) 导出待审队列（含原始输出、工具轨迹、未验断言明细）
+python3 run_eval.py --level L1 --export-review review.json
+
+# 2) 逐条人工填写 decision=approve|reject、reviewer、note
+#    reject 与未填都视为未确认，一律不放行
+
+# 3) 回读签核跑门禁；全部 approve 才放行
+python3 run_eval.py --level L1 --signoffs review.json
+```
+
+门禁理由会点名每条未确认用例（如 `CS-006[pending]`）。签核**绑定内容指纹**：
+输出、工具轨迹、未验断言任一变化，旧签核自动失效，必须用新报告重新确认；
+输出未变时签核可跨 `run_id` 复用，避免重复劳动。
+
+API 层为 `gate_decision(report, strict_review=True, signoffs=...)`；
+`strict_review=False` 回到历史「只标注不阻断」口径，仅用于本地演示与回归
+对照，生产门禁不应关闭。Web 控制台通过 `signoffs_path` 或环境变量
+`AGENT_EVAL_SIGNOFFS` 指定签核文件，并在返回里附带完整 `review_queue`。
 
 ## 覆盖账本可视化
 

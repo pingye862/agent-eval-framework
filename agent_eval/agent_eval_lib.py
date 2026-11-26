@@ -13,3 +13,6 @@ from judge import (SemanticJudge, OpenAICompatClient,             # noqa: F401
                    agreement_rate, cohen_kappa, CalibrationReport)
 from report import (build_ledger, render_coverage_html,                   # noqa: F401
                     render_coverage_text)
+from review import (ReviewSignoff, SignoffSet,                            # noqa: F401
+                    build_review_queue, export_review_queue, load_signoffs,
+                    review_fingerprint, review_reasons, review_stats)
